@@ -1,0 +1,10 @@
+timestamp,productId,kind,side,price,quantity,level,id,aggressor,traderId,ownTrade
+0,AMETHYSTS,quote,bid,9998,12,1,,,,
+0,AMETHYSTS,quote,ask,10002,11,1,,,,
+1000,AMETHYSTS,trade,buy,10001,3,,am-1,buyer,desk-alpha,true
+2000,AMETHYSTS,quote,bid,9999,10,1,,,,
+2000,AMETHYSTS,quote,ask,10003,9,1,,,,
+3000,AMETHYSTS,trade,sell,10000,4,,am-2,seller,market,false
+0,STARFRUIT,quote,bid,4998,8,1,,,,
+0,STARFRUIT,quote,ask,5002,9,1,,,,
+1000,STARFRUIT,trade,buy,5001,2,,sf-1,buyer,market,false
