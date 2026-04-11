@@ -1,54 +1,59 @@
-# IMC Prosperity Dashboard MVP
+# IMC Prosperity Dashboard Phase 0 + 1
 
-React + TypeScript dashboard foundation for IMC Prosperity market analysis with a modular data layer, centralized dashboard state, reusable panel primitives, and a hover-synced inspection model.
+React + TypeScript dashboard foundation for IMC Prosperity market analysis, focused on a stronger market chart and a shared inspection workflow that future features can plug into cleanly.
 
 ## Run
 
 ```bash
 npm install
-npm run dev
+npm run dev -- --host 127.0.0.1
 ```
 
-## Folder structure
+## Folder Structure
 
 ```text
 src/
-  app/                  App entry and global styling
+  app/                  App shell and global styling
   components/
-    chart/              Reusable chart container and market chart
-    controls/           Sidebar controls and dataset selectors
-    dashboard/          Dashboard composition and header
-    layout/             App shell layout primitives
-    panels/             Reusable panel container and secondary panels
+    chart/              Chart container, main market chart, inspection strip
+    controls/           Sidebar selectors and implemented / future control groups
+    dashboard/          High-level dashboard composition
+    layout/             Desktop-first shell layout primitives
+    panels/             Reusable cards plus overview / inspection / PnL / position / logs
   data/
-    loaders/            Swappable dataset repository and upload parsing
-    mock/               Built-in mock datasets
-  state/                Central dashboard provider and reducer
-  types/                Shared typed market and dashboard models
-  utils/                Pure selectors, derivations, and formatting helpers
+    loaders/            Raw file parsing and dataset repository layer
+    mock/               Built-in mock normalized dataset
+  state/                Central dashboard reducer and provider
+  types/                Raw-input types plus normalized market and dashboard state types
+  utils/                Derived selectors and formatting helpers
 public/
-  example-market.csv    Uploadable CSV sample
-  example-dataset.json  Uploadable JSON sample
+  tutorial/data/        Tutorial CSVs served directly to the frontend
+  example-*.{csv,json}  Upload examples
 ```
 
-## Architecture
+## Data Flow
 
-- Raw market data lives in typed domain models in `src/types/market.ts`.
-- UI state lives separately in `src/types/dashboard.ts` and `src/state/dashboardReducer.ts`.
-- `datasetRepository` abstracts data acquisition so mock, upload, or future remote sources can share one interface.
-- `DashboardProvider` owns dataset selection, product selection, hover state, and derived inspection context.
-- `buildVisualizationPoints` transforms raw data into chart-friendly points without leaking chart logic into loaders or UI panels.
-- Secondary panels read the same shared hover timestamp and inspection snapshot, which is the seam for future synced PnL, logs, and position views.
+- Raw input:
+  tutorial CSVs, uploaded CSV/JSON, and mock data enter through `src/data/loaders/`.
+- Normalized domain data:
+  loaders convert everything into one internal shape in `src/types/market.ts` with products, book snapshots, trades, own trades, PnL, position, indicators, and logs.
+- Derived visualization data:
+  `src/utils/marketSelectors.ts` builds visible bid/ask/trade/own-trade series, chart bounds, filtered events, and inspection helpers.
+- Shared inspection state:
+  the chart writes a full inspection snapshot into central state in `src/state/dashboardReducer.ts`, and panels consume that shared state.
+- Panels:
+  tooltip, inspection panel, inspection strip, PnL, position, and logs all stay synchronized through the same inspection contract.
 
-## Extension points
+## Why This Architecture Scales
 
-- Add remote loaders or filesystem-backed persistence by extending `DatasetRepository`.
-- Add overlays by turning `indicators` into rendered chart layers inside `MarketChart`.
-- Add performance controls by swapping `buildVisualizationPoints` for memoized/downsampled selectors.
-- Add richer filters by expanding `FilterState` and applying them in selector utilities rather than components.
+- Parsing stays out of React components, so new file formats can be added without touching the chart.
+- The chart renders normalized events instead of raw CSV rows, which makes overlays and filters much easier to add later.
+- Shared inspection state means future log viewers, indicators, or PnL panels can synchronize to hover without inventing separate hover logic.
+- Chart viewport lives in central dashboard state, so later panning, linked charts, or persisted views can build on the same model.
 
-## MVP tradeoffs
+## Phase 0 + 1 Tradeoffs
 
-- The chart is custom SVG instead of a full charting library so overlays and hover synchronization stay easy to control.
-- CSV parsing is intentionally simple and expects flat comma-separated records for quotes/trades.
-- Placeholder PnL, position, and logs panels are state-aware but not yet connected to strategy/accounting pipelines.
+- The chart is still a custom SVG implementation rather than a heavier charting library, which keeps overlay and inspection control straightforward.
+- CSV upload support is intentionally simple and assumes a flat event-oriented schema for uploads.
+- Tutorial data does not include true position/log files, so position and logs are normalized placeholders for now rather than full analytics.
+- Zoom is implemented first; richer pan/brush interactions can layer on top of the shared viewport state later.

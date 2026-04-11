@@ -1,12 +1,10 @@
 import { useMemo, type ChangeEvent } from "react";
 import { Panel } from "../panels/Panel";
 import { useDashboard } from "../../state/DashboardProvider";
-import { listUniqueTraders } from "../../utils/marketSelectors";
 
 export function ControlPanel() {
-  const { state, dispatch, datasets, availableProducts, selectedProduct, importDataset } = useDashboard();
-
-  const traders = useMemo(() => listUniqueTraders(selectedProduct?.trades ?? []), [selectedProduct]);
+  const { state, dispatch, datasets, availableProducts, tradeFilterSupport, importDataset } = useDashboard();
+  const depthLevels = useMemo(() => [1, 2, 3], []);
 
   const handleFileImport = async (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -57,7 +55,7 @@ export function ControlPanel() {
         </label>
       </Panel>
 
-      <Panel title="Visibility">
+      <Panel title="Book Visibility">
         <label className="toggle">
           <input
             type="checkbox"
@@ -82,10 +80,18 @@ export function ControlPanel() {
           />
           <span>Show trades</span>
         </label>
+        <label className="toggle">
+          <input
+            type="checkbox"
+            checked={state.visibility.ownTrades}
+            onChange={() => dispatch({ type: "toggleVisibility", key: "ownTrades" })}
+          />
+          <span>Show own trades</span>
+        </label>
         <div className="field">
           <span>Depth Levels</span>
           <div className="inline-toggles">
-            {[1, 2, 3].map((level) => {
+            {depthLevels.map((level) => {
               const checked = state.overlays.depthLevels.includes(level);
               const nextLevels = checked
                 ? state.overlays.depthLevels.filter((entry) => entry !== level)
@@ -107,6 +113,102 @@ export function ControlPanel() {
                 </label>
               );
             })}
+          </div>
+        </div>
+      </Panel>
+
+      <Panel title="Trade Filters">
+        <label className="field">
+          <span>Trade Type</span>
+          <select
+            value={state.filters.tradeType}
+            onChange={(event) =>
+              dispatch({
+                type: "setTradeTypeFilter",
+                tradeType: event.target.value as "all" | "maker" | "taker" | "own",
+              })
+            }
+          >
+            <option value="all">All trades</option>
+            <option value="maker">Maker only</option>
+            <option value="taker">Taker only</option>
+            <option value="own">Own trades only</option>
+          </select>
+        </label>
+
+        <label className="field">
+          <span>Trader Group</span>
+          <select
+            value={state.filters.traderGroup ?? ""}
+            disabled={!tradeFilterSupport.supportsTraderGroups}
+            onChange={(event) =>
+              dispatch({
+                type: "setTraderGroupFilter",
+                traderGroup: event.target.value || null,
+              })
+            }
+          >
+            <option value="">
+              {tradeFilterSupport.supportsTraderGroups ? "All groups" : "Not available in this dataset"}
+            </option>
+            {tradeFilterSupport.availableTraderGroups.map((group) => (
+              <option key={group} value={group}>
+                {group}
+              </option>
+            ))}
+          </select>
+        </label>
+
+        <label className="field">
+          <span>Trader ID</span>
+          <select
+            value={state.filters.traderId ?? ""}
+            disabled={!tradeFilterSupport.supportsTraderIds}
+            onChange={(event) =>
+              dispatch({
+                type: "setTraderIdFilter",
+                traderId: event.target.value || null,
+              })
+            }
+          >
+            <option value="">
+              {tradeFilterSupport.supportsTraderIds ? "All traders" : "Not available in this dataset"}
+            </option>
+            {tradeFilterSupport.availableTraderIds.map((traderId) => (
+              <option key={traderId} value={traderId}>
+                {traderId}
+              </option>
+            ))}
+          </select>
+        </label>
+
+        <div className="field">
+          <span>Quantity Range</span>
+          <div className="range-grid">
+            <input
+              type="number"
+              placeholder={tradeFilterSupport.minTradeQuantity?.toString() ?? "Min"}
+              value={state.filters.quantityRange?.[0] ?? ""}
+              onChange={(event) => {
+                const nextMin = event.target.value === "" ? null : Number(event.target.value);
+                dispatch({
+                  type: "setQuantityRange",
+                  quantityRange: [nextMin, state.filters.quantityRange?.[1] ?? null],
+                });
+              }}
+            />
+            <input
+              type="number"
+              placeholder={tradeFilterSupport.maxTradeQuantity?.toString() ?? "Max"}
+              value={state.filters.quantityRange?.[1] ?? ""}
+              onChange={(event) => {
+                const nextMax = event.target.value === "" ? null : Number(event.target.value);
+                dispatch({
+                  type: "setQuantityRange",
+                  quantityRange: [state.filters.quantityRange?.[0] ?? null, nextMax],
+                });
+              }}
+            />
           </div>
         </div>
       </Panel>
@@ -144,25 +246,7 @@ export function ControlPanel() {
           </select>
         </label>
 
-        <label className="field">
-          <span>Trader Filter</span>
-          <select
-            value={state.filters.traderIds[0] ?? ""}
-            onChange={(event) =>
-              dispatch({
-                type: "setTraderFilters",
-                traderIds: event.target.value ? [event.target.value] : [],
-              })
-            }
-          >
-            <option value="">All traders</option>
-            {traders.map((trader) => (
-              <option key={trader} value={trader}>
-                {trader}
-              </option>
-            ))}
-          </select>
-        </label>
+        <div className="future-filter-copy">Reserved for overlays, log syncing, normalization, and advanced performance controls.</div>
       </Panel>
     </div>
   );

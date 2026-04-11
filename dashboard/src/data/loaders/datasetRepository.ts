@@ -1,6 +1,17 @@
 import { mockDataset } from "../mock/mockDataset";
-import type { MarketDataset, ProductMarketData } from "../../types/market";
 import { loadTutorialDatasets } from "./tutorialDatasetLoader";
+import type {
+  BookLevel,
+  BookSnapshot,
+  IndicatorSeries,
+  MarketDataset,
+  OwnTrade,
+  PnLPoint,
+  PositionPoint,
+  ProductMarketData,
+  Trade,
+} from "../../types/market";
+import type { RawFlatMarketRow } from "../../types/rawData";
 
 export interface DatasetRepository {
   listDatasets(): Promise<MarketDataset[]>;
@@ -8,7 +19,7 @@ export interface DatasetRepository {
   importFile(file: File): Promise<MarketDataset>;
 }
 
-function parseCsv(text: string): ProductMarketData[] {
+function parseDelimitedRows(text: string): RawFlatMarketRow[] {
   const lines = text.trim().split(/\r?\n/);
   const [headerLine, ...rows] = lines;
 
@@ -16,17 +27,35 @@ function parseCsv(text: string): ProductMarketData[] {
     return [];
   }
 
-  const headers = headerLine.split(",").map((column) => column.trim());
+  const separator = headerLine.includes(";") ? ";" : ",";
+  const headers = headerLine.split(separator).map((column) => column.trim());
+
+  return rows
+    .filter((row) => row.trim().length > 0)
+    .map((row) => {
+      const values = row.split(separator).map((value) => value.trim());
+      return Object.fromEntries(headers.map((header, index) => [header, values[index]])) as unknown as RawFlatMarketRow;
+    });
+}
+
+function numberOrNull(value: string | undefined) {
+  if (!value || value.trim() === "") {
+    return null;
+  }
+
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function buildSnapshotMap() {
+  return new Map<number, { bids: BookLevel[]; asks: BookLevel[] }>();
+}
+
+function normalizeFlatRows(rows: RawFlatMarketRow[], datasetName: string): MarketDataset {
   const byProduct = new Map<string, ProductMarketData>();
 
   for (const row of rows) {
-    if (!row.trim()) {
-      continue;
-    }
-
-    const values = row.split(",").map((value) => value.trim());
-    const record = Object.fromEntries(headers.map((header, index) => [header, values[index]]));
-    const productId = record.productId;
+    const productId = row.productId;
 
     if (!productId) {
       continue;
@@ -39,42 +68,120 @@ function parseCsv(text: string): ProductMarketData[] {
           symbol: productId,
           displayName: productId,
         },
-        orderBook: [],
+        bookSnapshots: [],
         trades: [],
+        ownTrades: [],
+        pnlSeries: [],
+        positionSeries: [],
         indicators: [],
+        logs: [],
       });
     }
 
     const product = byProduct.get(productId)!;
-    const timestamp = Number(record.timestamp ?? 0);
-    const price = Number(record.price ?? 0);
-    const quantity = Number(record.quantity ?? 0);
+    const timestamp = numberOrNull(row.timestamp) ?? 0;
+    const price = numberOrNull(row.price) ?? 0;
+    const quantity = numberOrNull(row.quantity) ?? 0;
 
-    if (record.kind === "trade") {
-      product.trades.push({
-        id: record.id ?? `${productId}-${timestamp}-${product.trades.length}`,
+    if (row.kind === "trade") {
+      const tradeBase = {
+        id: row.id ?? `${productId}-${timestamp}-${product.trades.length}`,
         timestamp,
         productId,
         price,
         quantity,
-        side: record.side === "buy" ? "buy" : "sell",
-        aggressor: record.aggressor === "buyer" ? "buyer" : record.aggressor === "seller" ? "seller" : "unknown",
-        traderId: record.traderId || undefined,
-        ownTrade: record.ownTrade === "true",
-      });
+        side: row.side === "sell" ? "sell" : "buy",
+        aggressor:
+          row.aggressor === "buyer" ? "buyer" : row.aggressor === "seller" ? "seller" : "unknown",
+        traderId: row.traderId || undefined,
+        traderGroup: undefined,
+        tradeType: row.aggressor === "unknown" ? "unknown" : "taker",
+      } satisfies Trade;
+
+      if (row.ownTrade === "true") {
+        product.ownTrades.push({
+          ...tradeBase,
+          strategyTag: "uploaded-own-trade",
+        } satisfies OwnTrade);
+      } else {
+        product.trades.push(tradeBase);
+      }
+      continue;
+    }
+
+    const level = numberOrNull(row.level) ?? 1;
+    const snapshotMap = (product as ProductMarketData & { _snapshotMap?: Map<number, { bids: BookLevel[]; asks: BookLevel[] }> })._snapshotMap ?? buildSnapshotMap();
+    (product as ProductMarketData & { _snapshotMap?: Map<number, { bids: BookLevel[]; asks: BookLevel[] }> })._snapshotMap = snapshotMap;
+
+    if (!snapshotMap.has(timestamp)) {
+      snapshotMap.set(timestamp, { bids: [], asks: [] });
+    }
+
+    const bookLevel: BookLevel = {
+      price,
+      quantity,
+      level,
+      side: row.side === "ask" ? "ask" : "bid",
+    };
+
+    if (bookLevel.side === "bid") {
+      snapshotMap.get(timestamp)!.bids.push(bookLevel);
     } else {
-      product.orderBook.push({
-        timestamp,
-        productId,
-        side: record.side === "bid" ? "bid" : "ask",
-        price,
-        quantity,
-        level: Number(record.level ?? 1),
-      });
+      snapshotMap.get(timestamp)!.asks.push(bookLevel);
     }
   }
 
-  return [...byProduct.values()];
+  const products = [...byProduct.values()].map((product) => {
+    const snapshotMap = (product as ProductMarketData & { _snapshotMap?: Map<number, { bids: BookLevel[]; asks: BookLevel[] }> })._snapshotMap;
+    const snapshots: BookSnapshot[] = snapshotMap
+      ? [...snapshotMap.entries()]
+          .sort((left, right) => left[0] - right[0])
+          .map(([timestamp, levels]) => ({
+            timestamp,
+            productId: product.product.id,
+            bids: levels.bids.sort((left, right) => left.level - right.level),
+            asks: levels.asks.sort((left, right) => left.level - right.level),
+          }))
+      : [];
+
+    return {
+      product: product.product,
+      bookSnapshots: snapshots,
+      trades: product.trades,
+      ownTrades: product.ownTrades,
+      pnlSeries: [] as PnLPoint[],
+      positionSeries: [] as PositionPoint[],
+      indicators: [
+        {
+          id: "uploaded-mid-price",
+          label: "Uploaded Mid Price",
+          color: "#f4c95d",
+          points: snapshots
+            .filter((snapshot) => snapshot.bids[0] && snapshot.asks[0])
+            .map((snapshot) => ({
+              timestamp: snapshot.timestamp,
+              value: (snapshot.bids[0].price + snapshot.asks[0].price) / 2,
+            })),
+        },
+      ] as IndicatorSeries[],
+      logs: [],
+    };
+  });
+
+  return {
+    id: `upload-${new Date().toISOString()}`,
+    name: datasetName,
+    description: "Imported local dataset",
+    source: "upload",
+    createdAt: new Date().toISOString(),
+    products,
+    metadata: {
+      snapshotCount: products.reduce((sum, product) => sum + product.bookSnapshots.length, 0),
+      tradeCount: products.reduce((sum, product) => sum + product.trades.length, 0),
+      ownTradeCount: products.reduce((sum, product) => sum + product.ownTrades.length, 0),
+      rowCount: rows.length,
+    },
+  };
 }
 
 function parseJson(text: string): MarketDataset {
@@ -112,12 +219,7 @@ class InMemoryDatasetRepository implements DatasetRepository {
   async listDatasets() {
     await this.ensureTutorialDatasetsLoaded();
     return [...this.datasets.values()].sort((left, right) => {
-      const sourceRank = {
-        tutorial: 0,
-        upload: 1,
-        mock: 2,
-      } as const;
-
+      const sourceRank = { tutorial: 0, upload: 1, mock: 2 } as const;
       return sourceRank[left.source] - sourceRank[right.source] || left.name.localeCompare(right.name);
     });
   }
@@ -130,19 +232,7 @@ class InMemoryDatasetRepository implements DatasetRepository {
   async importFile(file: File) {
     const text = await file.text();
     const extension = file.name.split(".").pop()?.toLowerCase();
-    const createdAt = new Date().toISOString();
-
-    const dataset =
-      extension === "json"
-        ? parseJson(text)
-        : {
-            id: `upload-${createdAt}`,
-            name: file.name,
-            description: "Imported local dataset",
-            source: "upload" as const,
-            createdAt,
-            products: parseCsv(text),
-          };
+    const dataset = extension === "json" ? parseJson(text) : normalizeFlatRows(parseDelimitedRows(text), file.name);
 
     this.datasets.set(dataset.id, dataset);
     return dataset;

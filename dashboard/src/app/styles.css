@@ -173,7 +173,8 @@ select {
 }
 
 .field input[type="file"],
-.field select {
+.field select,
+.field input[type="number"] {
   width: 100%;
   border: 1px solid var(--border);
   background: #0d131a;
@@ -203,6 +204,12 @@ select {
   margin-bottom: 0;
 }
 
+.range-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
 .chart-card__header p {
   margin: 4px 0 0;
 }
@@ -213,6 +220,28 @@ select {
   background: rgba(88, 166, 255, 0.12);
   color: #c9def8;
   font-size: 0.82rem;
+}
+
+.chart-card__aside-group {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.chart-card__button {
+  border: 1px solid var(--border);
+  background: #0d131a;
+  color: inherit;
+  border-radius: 999px;
+  padding: 6px 12px;
+  cursor: pointer;
+}
+
+.chart-card__button:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 
 .market-chart {
@@ -259,6 +288,32 @@ select {
 
 .chart-tooltip--empty {
   color: var(--text-muted);
+}
+
+.inspection-strip {
+  display: flex;
+  gap: 18px;
+  flex-wrap: wrap;
+  padding: 10px 14px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: rgba(13, 19, 26, 0.92);
+  color: #d7e0ea;
+  font-size: 0.88rem;
+}
+
+.inspection-strip span {
+  color: #cdd7e1;
+}
+
+.inspection-strip__filters {
+  color: #92a0b4;
+}
+
+.future-filter-copy {
+  color: var(--text-muted);
+  font-size: 0.84rem;
+  line-height: 1.5;
 }
 
 .inspection-grid {

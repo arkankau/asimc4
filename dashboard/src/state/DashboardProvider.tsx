@@ -10,16 +10,23 @@ import {
 } from "react";
 import { datasetRepository } from "../data/loaders/datasetRepository";
 import { dashboardReducer, initialDashboardState } from "./dashboardReducer";
-import type { DashboardAction, DashboardState } from "../types/dashboard";
-import type { InspectionSnapshot, MarketDataset, ProductMarketData } from "../types/market";
-import { buildInspectionSnapshot, getDatasetProduct, listProducts } from "../utils/marketSelectors";
+import type { DashboardAction, DashboardInspectionState, DashboardState } from "../types/dashboard";
+import type { ChartSeriesBundle, MarketDataset, ProductMarketData, TradeFilterSupport } from "../types/market";
+import {
+  buildChartSeriesBundle,
+  getDatasetProduct,
+  getTradeFilterSupport,
+  listProducts,
+} from "../utils/marketSelectors";
 
 interface DashboardContextValue {
   state: DashboardState;
   datasets: MarketDataset[];
   selectedDataset: MarketDataset | null;
   selectedProduct: ProductMarketData | null;
-  inspection: InspectionSnapshot;
+  chartSeries: ChartSeriesBundle;
+  tradeFilterSupport: TradeFilterSupport;
+  inspection: DashboardInspectionState;
   dispatch: Dispatch<DashboardAction>;
   importDataset: (file: File) => Promise<void>;
   refreshDatasets: () => Promise<void>;
@@ -70,10 +77,12 @@ export function DashboardProvider({ children }: PropsWithChildren) {
     [selectedDataset, state.selectedProductId],
   );
 
-  const inspection = useMemo(
-    () => buildInspectionSnapshot(selectedProduct, state.hoveredTimestamp),
-    [selectedProduct, state.hoveredTimestamp],
+  const chartSeries = useMemo(
+    () => buildChartSeriesBundle(selectedProduct, state),
+    [selectedProduct, state],
   );
+
+  const tradeFilterSupport = useMemo(() => getTradeFilterSupport(selectedProduct), [selectedProduct]);
 
   const importDataset = async (file: File) => {
     const uploaded = await datasetRepository.importFile(file);
@@ -91,7 +100,9 @@ export function DashboardProvider({ children }: PropsWithChildren) {
     datasets,
     selectedDataset,
     selectedProduct,
-    inspection,
+    chartSeries,
+    tradeFilterSupport,
+    inspection: state.inspection,
     dispatch,
     importDataset,
     refreshDatasets,

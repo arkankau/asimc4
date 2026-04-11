@@ -1,13 +1,27 @@
-import type { DashboardAction, DashboardState } from "../types/dashboard";
+import type { DashboardAction, DashboardInspectionState, DashboardState } from "../types/dashboard";
+
+export const emptyInspectionState: DashboardInspectionState = {
+  hoveredTimestamp: null,
+  hoveredProductId: null,
+  hoveredEvent: null,
+  hoveredEventType: null,
+  hoveredPrice: null,
+  hoveredQuantity: null,
+  nearestVisibleBid: null,
+  nearestVisibleAsk: null,
+  nearestVisibleTrade: null,
+  nearestVisibleOwnTrade: null,
+  activeFilterSummary: [],
+};
 
 export const initialDashboardState: DashboardState = {
   selectedDatasetId: null,
   selectedProductId: null,
-  hoveredTimestamp: null,
   visibility: {
     bids: true,
     asks: true,
     trades: true,
+    ownTrades: true,
   },
   overlays: {
     enabledIndicators: [],
@@ -16,9 +30,13 @@ export const initialDashboardState: DashboardState = {
     depthLevels: [1, 2, 3],
   },
   filters: {
-    traderIds: [],
+    tradeType: "all",
+    traderGroup: null,
+    traderId: null,
     quantityRange: null,
   },
+  chartViewport: null,
+  inspection: emptyInspectionState,
 };
 
 export function dashboardReducer(state: DashboardState, action: DashboardAction): DashboardState {
@@ -28,18 +46,25 @@ export function dashboardReducer(state: DashboardState, action: DashboardAction)
         ...state,
         selectedDatasetId: action.datasetId,
         selectedProductId: null,
-        hoveredTimestamp: null,
+        chartViewport: null,
+        inspection: emptyInspectionState,
       };
     case "setProduct":
       return {
         ...state,
         selectedProductId: action.productId,
-        hoveredTimestamp: null,
+        chartViewport: null,
+        inspection: emptyInspectionState,
       };
-    case "setHoveredTimestamp":
+    case "setInspection":
       return {
         ...state,
-        hoveredTimestamp: action.timestamp,
+        inspection: action.inspection,
+      };
+    case "clearInspection":
+      return {
+        ...state,
+        inspection: emptyInspectionState,
       };
     case "toggleVisibility":
       return {
@@ -83,12 +108,28 @@ export function dashboardReducer(state: DashboardState, action: DashboardAction)
           depthLevels: action.levels,
         },
       };
-    case "setTraderFilters":
+    case "setTradeTypeFilter":
       return {
         ...state,
         filters: {
           ...state.filters,
-          traderIds: action.traderIds,
+          tradeType: action.tradeType,
+        },
+      };
+    case "setTraderGroupFilter":
+      return {
+        ...state,
+        filters: {
+          ...state.filters,
+          traderGroup: action.traderGroup,
+        },
+      };
+    case "setTraderIdFilter":
+      return {
+        ...state,
+        filters: {
+          ...state.filters,
+          traderId: action.traderId,
         },
       };
     case "setQuantityRange":
@@ -98,6 +139,16 @@ export function dashboardReducer(state: DashboardState, action: DashboardAction)
           ...state.filters,
           quantityRange: action.quantityRange,
         },
+      };
+    case "setChartViewport":
+      return {
+        ...state,
+        chartViewport: action.viewport,
+      };
+    case "resetChartViewport":
+      return {
+        ...state,
+        chartViewport: null,
       };
     default:
       return state;

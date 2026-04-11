@@ -1,100 +1,192 @@
-import { useMemo, useRef, useState } from "react";
+import { useMemo, useRef, type WheelEvent } from "react";
 import { ChartContainer } from "./ChartContainer";
 import { useDashboard } from "../../state/DashboardProvider";
-import { buildVisualizationPoints, collectChartBounds } from "../../utils/marketSelectors";
 import { formatPrice, formatQuantity, formatTimestamp } from "../../utils/formatters";
-import type { VisualizationPoint } from "../../types/market";
+import { buildInspectionState, findNearestEventByScreenX } from "../../utils/marketSelectors";
+import type { ChartViewport, MarketEvent } from "../../types/market";
 
 const CHART_WIDTH = 920;
 const CHART_HEIGHT = 460;
 const PADDING = { top: 20, right: 20, bottom: 36, left: 64 };
+const MIN_ZOOM_SPAN_RATIO = 0.04;
 
-const colorBySide: Record<VisualizationPoint["side"], string> = {
-  bid: "#4ea66e",
-  ask: "#d06464",
-  buy: "#58a6ff",
-  sell: "#f0883e",
-};
+function clamp(value: number, min: number, max: number) {
+  return Math.min(Math.max(value, min), max);
+}
+
+function createZoomedViewport(
+  current: ChartViewport,
+  fullBounds: ChartViewport,
+  chartX: number,
+  chartY: number,
+  plotWidth: number,
+  plotHeight: number,
+  zoomFactor: number,
+): ChartViewport | null {
+  const timeSpan = Math.max(current.maxTimestamp - current.minTimestamp, 1);
+  const priceSpan = Math.max(current.maxPrice - current.minPrice, 1);
+  const fullTimeSpan = Math.max(fullBounds.maxTimestamp - fullBounds.minTimestamp, 1);
+  const fullPriceSpan = Math.max(fullBounds.maxPrice - fullBounds.minPrice, 1);
+  const minTimeSpan = Math.max(fullTimeSpan * MIN_ZOOM_SPAN_RATIO, 10);
+  const minPriceSpan = Math.max(fullPriceSpan * MIN_ZOOM_SPAN_RATIO, 1);
+
+  const targetTimeSpan = clamp(timeSpan * zoomFactor, minTimeSpan, fullTimeSpan);
+  const targetPriceSpan = clamp(priceSpan * zoomFactor, minPriceSpan, fullPriceSpan);
+
+  const cursorTimeRatio = (chartX - PADDING.left) / plotWidth;
+  const cursorPriceRatio = 1 - (chartY - PADDING.top) / plotHeight;
+
+  let nextMinTimestamp = current.minTimestamp + (timeSpan - targetTimeSpan) * cursorTimeRatio;
+  let nextMaxTimestamp = nextMinTimestamp + targetTimeSpan;
+
+  if (nextMinTimestamp < fullBounds.minTimestamp) {
+    nextMinTimestamp = fullBounds.minTimestamp;
+    nextMaxTimestamp = nextMinTimestamp + targetTimeSpan;
+  }
+
+  if (nextMaxTimestamp > fullBounds.maxTimestamp) {
+    nextMaxTimestamp = fullBounds.maxTimestamp;
+    nextMinTimestamp = nextMaxTimestamp - targetTimeSpan;
+  }
+
+  let nextMinPrice = current.minPrice + (priceSpan - targetPriceSpan) * cursorPriceRatio;
+  let nextMaxPrice = nextMinPrice + targetPriceSpan;
+
+  if (nextMinPrice < fullBounds.minPrice) {
+    nextMinPrice = fullBounds.minPrice;
+    nextMaxPrice = nextMinPrice + targetPriceSpan;
+  }
+
+  if (nextMaxPrice > fullBounds.maxPrice) {
+    nextMaxPrice = fullBounds.maxPrice;
+    nextMinPrice = nextMaxPrice - targetPriceSpan;
+  }
+
+  const isFullDomain =
+    Math.abs(nextMinTimestamp - fullBounds.minTimestamp) < 1 &&
+    Math.abs(nextMaxTimestamp - fullBounds.maxTimestamp) < 1 &&
+    Math.abs(nextMinPrice - fullBounds.minPrice) < 0.0001 &&
+    Math.abs(nextMaxPrice - fullBounds.maxPrice) < 0.0001;
+
+  if (isFullDomain) {
+    return null;
+  }
+
+  return {
+    minTimestamp: nextMinTimestamp,
+    maxTimestamp: nextMaxTimestamp,
+    minPrice: nextMinPrice,
+    maxPrice: nextMaxPrice,
+  };
+}
+
+function buildQuotePath(events: MarketEvent[], level: number) {
+  return events
+    .filter((event) => event.level === level)
+    .sort((left, right) => left.timestamp - right.timestamp)
+    .map((event, index) => ({ index, event }));
+}
+
+function renderOwnTradeDiamond(cx: number, cy: number, radius: number) {
+  return `${cx},${cy - radius} ${cx + radius},${cy} ${cx},${cy + radius} ${cx - radius},${cy}`;
+}
 
 export function MarketChart() {
-  const { state, selectedProduct, dispatch } = useDashboard();
-  const points = useMemo(() => buildVisualizationPoints(selectedProduct, state), [selectedProduct, state]);
-  const bounds = useMemo(() => collectChartBounds(points), [points]);
-  const midPriceSeries = selectedProduct?.indicators.find((series) => series.id === "mid-price")?.points ?? [];
-  const [tooltip, setTooltip] = useState<{ x: number; y: number; point: VisualizationPoint } | null>(null);
+  const { state, selectedProduct, chartSeries, inspection, dispatch } = useDashboard();
   const svgRef = useRef<SVGSVGElement | null>(null);
-
   const plotWidth = CHART_WIDTH - PADDING.left - PADDING.right;
   const plotHeight = CHART_HEIGHT - PADDING.top - PADDING.bottom;
 
   const xScale = (timestamp: number) => {
-    const span = Math.max(bounds.maxTimestamp - bounds.minTimestamp, 1);
-    return PADDING.left + ((timestamp - bounds.minTimestamp) / span) * plotWidth;
+    const span = Math.max(chartSeries.viewport.maxTimestamp - chartSeries.viewport.minTimestamp, 1);
+    return PADDING.left + ((timestamp - chartSeries.viewport.minTimestamp) / span) * plotWidth;
   };
 
   const yScale = (price: number) => {
-    const span = Math.max(bounds.maxPrice - bounds.minPrice, 1);
-    return PADDING.top + plotHeight - ((price - bounds.minPrice) / span) * plotHeight;
+    const span = Math.max(chartSeries.viewport.maxPrice - chartSeries.viewport.minPrice, 1);
+    return PADDING.top + plotHeight - ((price - chartSeries.viewport.minPrice) / span) * plotHeight;
   };
 
+  const midPriceSeries = chartSeries.visibleIndicators.find((series) => series.id === "mid-price");
+
+  const quotePaths = useMemo(
+    () =>
+      (["bid", "ask"] as const).flatMap((kind) =>
+        state.overlays.depthLevels.map((level) => ({
+          key: `${kind}-${level}`,
+          kind,
+          level,
+          points: buildQuotePath(kind === "bid" ? chartSeries.visibleBids : chartSeries.visibleAsks, level),
+        })),
+      ),
+    [chartSeries.visibleAsks, chartSeries.visibleBids, state.overlays.depthLevels],
+  );
+
+  const hoveredX = inspection.hoveredEvent ? xScale(inspection.hoveredEvent.timestamp) : null;
+  const hoveredY = inspection.hoveredEvent ? yScale(inspection.hoveredEvent.price) : null;
+
   const handleMove = (event: React.MouseEvent<SVGSVGElement>) => {
-    if (!svgRef.current || points.length === 0) {
+    if (!svgRef.current || chartSeries.visibleEvents.length === 0) {
       return;
     }
 
     const rect = svgRef.current.getBoundingClientRect();
-    const relativeX = event.clientX - rect.left;
-    const hovered = points.reduce<VisualizationPoint | null>((closest, point) => {
-      const pointX = xScale(point.timestamp);
-      if (!closest) {
-        return point;
-      }
-
-      return Math.abs(pointX - relativeX) < Math.abs(xScale(closest.timestamp) - relativeX) ? point : closest;
-    }, null);
-
-    if (!hovered) {
-      return;
-    }
-
-    dispatch({ type: "setHoveredTimestamp", timestamp: hovered.timestamp });
-    setTooltip({
-      x: xScale(hovered.timestamp),
-      y: yScale(hovered.price),
-      point: hovered,
+    const relativeX = clamp(event.clientX - rect.left, PADDING.left, CHART_WIDTH - PADDING.right);
+    const hoveredEvent = findNearestEventByScreenX(chartSeries.visibleEvents, relativeX, xScale);
+    dispatch({
+      type: "setInspection",
+      inspection: buildInspectionState(selectedProduct, hoveredEvent, chartSeries),
     });
   };
 
   const handleLeave = () => {
-    dispatch({ type: "setHoveredTimestamp", timestamp: null });
-    setTooltip(null);
+    dispatch({ type: "clearInspection" });
   };
 
-  const quotePaths = (["bid", "ask"] as const).flatMap((side) =>
-    state.overlays.depthLevels.map((level) => {
-      const path = points
-        .filter((point) => point.kind === "quote" && point.side === side && point.level === level)
-        .map((point, index) => `${index === 0 ? "M" : "L"} ${xScale(point.timestamp)} ${yScale(point.price)}`)
-        .join(" ");
+  const handleWheel = (event: WheelEvent<SVGSVGElement>) => {
+    if (!svgRef.current || chartSeries.visibleEvents.length === 0) {
+      return;
+    }
 
-      return {
-        key: `${side}-${level}`,
-        side,
-        level,
-        path,
-      };
-    }),
-  );
+    event.preventDefault();
 
-  const midPricePath = midPriceSeries
-    .map((point, index) => `${index === 0 ? "M" : "L"} ${xScale(point.timestamp)} ${yScale(point.value)}`)
-    .join(" ");
+    const rect = svgRef.current.getBoundingClientRect();
+    const chartX = clamp(event.clientX - rect.left, PADDING.left, CHART_WIDTH - PADDING.right);
+    const chartY = clamp(event.clientY - rect.top, PADDING.top, CHART_HEIGHT - PADDING.bottom);
+    const zoomFactor = event.deltaY < 0 ? 0.82 : 1.22;
+
+    dispatch({
+      type: "setChartViewport",
+      viewport: createZoomedViewport(
+        state.chartViewport ?? chartSeries.fullBounds,
+        chartSeries.fullBounds,
+        chartX,
+        chartY,
+        plotWidth,
+        plotHeight,
+        zoomFactor,
+      ),
+    });
+  };
 
   return (
     <ChartContainer
       title="Market View"
-      subtitle={selectedProduct ? `${selectedProduct.product.displayName} order book and trades` : "Load a dataset"}
-      aside={<span className="chart-card__stat">{points.length} rendered points</span>}
+      subtitle={selectedProduct ? `${selectedProduct.product.displayName} market microstructure view` : "Load a dataset"}
+      aside={
+        <div className="chart-card__aside-group">
+          <span className="chart-card__stat">{chartSeries.visibleEvents.length} visible events</span>
+          {chartSeries.filterSummary.length > 0 ? <span className="chart-card__stat">{chartSeries.filterSummary[0]}</span> : null}
+          <button
+            className="chart-card__button"
+            type="button"
+            onClick={() => dispatch({ type: "resetChartViewport" })}
+            disabled={!state.chartViewport}
+          >
+            Reset Zoom
+          </button>
+        </div>
+      }
     >
       <svg
         ref={svgRef}
@@ -104,12 +196,16 @@ export function MarketChart() {
         aria-label="Market chart"
         onMouseMove={handleMove}
         onMouseLeave={handleLeave}
+        onWheel={handleWheel}
+        onDoubleClick={() => dispatch({ type: "resetChartViewport" })}
       >
         <rect x="0" y="0" width={CHART_WIDTH} height={CHART_HEIGHT} fill="#10151d" rx="12" />
 
         {Array.from({ length: 5 }, (_, index) => {
           const y = PADDING.top + (plotHeight / 4) * index;
-          const price = bounds.maxPrice - ((bounds.maxPrice - bounds.minPrice) / 4) * index;
+          const price =
+            chartSeries.viewport.maxPrice -
+            ((chartSeries.viewport.maxPrice - chartSeries.viewport.minPrice) / 4) * index;
 
           return (
             <g key={`grid-y-${index}`}>
@@ -123,7 +219,9 @@ export function MarketChart() {
 
         {Array.from({ length: 6 }, (_, index) => {
           const x = PADDING.left + (plotWidth / 5) * index;
-          const timestamp = bounds.minTimestamp + ((bounds.maxTimestamp - bounds.minTimestamp) / 5) * index;
+          const timestamp =
+            chartSeries.viewport.minTimestamp +
+            ((chartSeries.viewport.maxTimestamp - chartSeries.viewport.minTimestamp) / 5) * index;
 
           return (
             <g key={`grid-x-${index}`}>
@@ -135,61 +233,89 @@ export function MarketChart() {
           );
         })}
 
-        {midPricePath ? (
-          <path d={midPricePath} fill="none" stroke="#f4c95d" strokeWidth="1.5" strokeDasharray="6 5" opacity="0.7" />
+        {midPriceSeries ? (
+          <path
+            d={midPriceSeries.points
+              .map((point, index) => `${index === 0 ? "M" : "L"} ${xScale(point.timestamp)} ${yScale(point.value)}`)
+              .join(" ")}
+            fill="none"
+            stroke="#f4c95d"
+            strokeWidth="1.2"
+            strokeDasharray="6 4"
+            opacity="0.7"
+          />
         ) : null}
 
-        {quotePaths.map(({ key, side, level, path }) =>
-          path ? (
+        {quotePaths.map(({ key, kind, level, points }) =>
+          points.length > 0 ? (
             <path
               key={key}
-              d={path}
+              d={points.map(({ event, index }) => `${index === 0 ? "M" : "L"} ${xScale(event.timestamp)} ${yScale(event.price)}`).join(" ")}
               fill="none"
-              stroke={side === "bid" ? "#4ea66e" : "#d06464"}
-              strokeWidth={Math.max(1, 2.6 - (level - 1) * 0.6)}
-              opacity={Math.max(0.4, 0.95 - (level - 1) * 0.2)}
+              stroke={kind === "bid" ? "#4ea66e" : "#d06464"}
+              strokeWidth={Math.max(1, 2.6 - (level - 1) * 0.55)}
+              opacity={Math.max(0.35, 0.95 - (level - 1) * 0.2)}
             />
           ) : null,
         )}
 
-        {points
-          .filter((point) => point.kind === "trade")
-          .map((point) => (
-            <circle
-              key={`${point.kind}-${point.timestamp}-${point.price}-${point.side}`}
-              cx={xScale(point.timestamp)}
-              cy={yScale(point.price)}
-              r={4 + Math.min(point.quantity, 5)}
-              fill={colorBySide[point.side]}
-              opacity={0.85}
-              stroke="#0d1117"
-              strokeWidth="1.5"
-            />
-          ))}
+        {chartSeries.visibleTrades.map((event) => (
+          <circle
+            key={event.id}
+            cx={xScale(event.timestamp)}
+            cy={yScale(event.price)}
+            r={1.2 + Math.min(event.quantity, 6) * 0.22}
+            fill={event.side === "buy" ? "#58a6ff" : "#f0883e"}
+            opacity={0.75}
+            stroke="#0d1117"
+            strokeWidth="0.8"
+          />
+        ))}
 
-        {tooltip ? (
-          <>
-            <line
-              x1={tooltip.x}
-              y1={PADDING.top}
-              x2={tooltip.x}
-              y2={CHART_HEIGHT - PADDING.bottom}
-              className="chart-crosshair"
+        {chartSeries.visibleOwnTrades.map((event) => {
+          const cx = xScale(event.timestamp);
+          const cy = yScale(event.price);
+          const radius = 4.2;
+          return (
+            <polygon
+              key={event.id}
+              points={renderOwnTradeDiamond(cx, cy, radius)}
+              fill="#f4c95d"
+              opacity={0.95}
+              stroke="#0d1117"
+              strokeWidth="1"
             />
-            <circle cx={tooltip.x} cy={tooltip.y} r={6} fill="#f4c95d" stroke="#fff1" />
-          </>
+          );
+        })}
+
+        {hoveredX !== null ? (
+          <line
+            x1={hoveredX}
+            y1={PADDING.top}
+            x2={hoveredX}
+            y2={CHART_HEIGHT - PADDING.bottom}
+            className="chart-crosshair"
+          />
+        ) : null}
+
+        {hoveredX !== null && hoveredY !== null ? (
+          <circle cx={hoveredX} cy={hoveredY} r={5.5} fill="#f4c95d" stroke="#fff1" />
         ) : null}
       </svg>
 
-      {tooltip ? (
+      {inspection.hoveredEvent ? (
         <div className="chart-tooltip">
-          <strong>{tooltip.point.label}</strong>
-          <span>{formatTimestamp(tooltip.point.timestamp)}</span>
-          <span>Price {formatPrice(tooltip.point.price)}</span>
-          <span>Qty {formatQuantity(tooltip.point.quantity)}</span>
+          <strong>{inspection.hoveredEvent.label}</strong>
+          <span>{formatTimestamp(inspection.hoveredTimestamp)}</span>
+          <span>Price {formatPrice(inspection.hoveredPrice)}</span>
+          <span>Qty {formatQuantity(inspection.hoveredQuantity)}</span>
+          <span>Type {inspection.hoveredEventType}</span>
+          {inspection.hoveredEvent?.tradeType ? <span>Flow {inspection.hoveredEvent.tradeType}</span> : null}
         </div>
       ) : (
-        <div className="chart-tooltip chart-tooltip--empty">Hover the chart to inspect the nearest market event.</div>
+        <div className="chart-tooltip chart-tooltip--empty">
+          Hover the chart to inspect the nearest event. Scroll to zoom and double-click to reset.
+        </div>
       )}
     </ChartContainer>
   );

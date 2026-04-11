@@ -1,7 +1,7 @@
 {
   "id": "example-json-session",
   "name": "Example JSON Session",
-  "description": "Small MarketDataset example for local uploads.",
+  "description": "Small normalized MarketDataset example for uploads.",
   "source": "upload",
   "createdAt": "2026-04-10T00:00:00.000Z",
   "products": [
@@ -11,36 +11,80 @@
         "symbol": "AMETHYSTS",
         "displayName": "Amethysts"
       },
-      "orderBook": [
-        { "timestamp": 0, "productId": "AMETHYSTS", "side": "bid", "price": 9998, "quantity": 12, "level": 1 },
-        { "timestamp": 0, "productId": "AMETHYSTS", "side": "ask", "price": 10002, "quantity": 11, "level": 1 },
-        { "timestamp": 1000, "productId": "AMETHYSTS", "side": "bid", "price": 9999, "quantity": 9, "level": 1 },
-        { "timestamp": 1000, "productId": "AMETHYSTS", "side": "ask", "price": 10003, "quantity": 10, "level": 1 }
+      "bookSnapshots": [
+        {
+          "timestamp": 0,
+          "productId": "AMETHYSTS",
+          "bids": [{ "price": 9998, "quantity": 12, "level": 1, "side": "bid" }],
+          "asks": [{ "price": 10002, "quantity": 11, "level": 1, "side": "ask" }]
+        },
+        {
+          "timestamp": 1000,
+          "productId": "AMETHYSTS",
+          "bids": [{ "price": 9999, "quantity": 9, "level": 1, "side": "bid" }],
+          "asks": [{ "price": 10003, "quantity": 10, "level": 1, "side": "ask" }]
+        }
       ],
       "trades": [
         {
-          "id": "am-json-1",
+          "id": "am-trade-1",
           "timestamp": 1000,
           "productId": "AMETHYSTS",
           "price": 10001,
           "quantity": 3,
           "side": "buy",
           "aggressor": "buyer",
-          "traderId": "desk-alpha",
-          "ownTrade": true
+          "traderId": "market"
         }
+      ],
+      "ownTrades": [
+        {
+          "id": "am-own-1",
+          "timestamp": 1000,
+          "productId": "AMETHYSTS",
+          "price": 10000,
+          "quantity": 2,
+          "side": "buy",
+          "aggressor": "buyer",
+          "traderId": "our-strategy",
+          "strategyTag": "example"
+        }
+      ],
+      "pnlSeries": [
+        { "timestamp": 0, "value": 0 },
+        { "timestamp": 1000, "value": 5.5 }
+      ],
+      "positionSeries": [
+        { "timestamp": 0, "value": 0 },
+        { "timestamp": 1000, "value": 2 }
       ],
       "indicators": [
         {
-          "id": "fair-value",
-          "label": "Fair Value",
+          "id": "mid-price",
+          "label": "Mid Price",
           "color": "#f4c95d",
           "points": [
             { "timestamp": 0, "value": 10000 },
             { "timestamp": 1000, "value": 10001 }
           ]
         }
+      ],
+      "logs": [
+        {
+          "id": "log-1",
+          "timestamp": 1000,
+          "productId": "AMETHYSTS",
+          "level": "info",
+          "source": "example",
+          "message": "Example normalized dataset log entry."
+        }
       ]
     }
-  ]
+  ],
+  "metadata": {
+    "snapshotCount": 2,
+    "tradeCount": 1,
+    "ownTradeCount": 1,
+    "rowCount": 5
+  }
 }

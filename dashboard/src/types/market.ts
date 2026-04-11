@@ -4,6 +4,8 @@ export type DatasetId = string;
 
 export type BookSide = "bid" | "ask";
 export type TradeSide = "buy" | "sell";
+export type MarketEventKind = "bid" | "ask" | "trade" | "ownTrade";
+export type TradeType = "maker" | "taker" | "unknown";
 export type DataSourceKind = "mock" | "upload" | "tutorial";
 
 export interface Product {
@@ -13,13 +15,18 @@ export interface Product {
   tickSize?: number;
 }
 
-export interface OrderBookLevel {
-  timestamp: Timestamp;
-  productId: ProductId;
-  side: BookSide;
+export interface BookLevel {
   price: number;
   quantity: number;
   level: number;
+  side: BookSide;
+}
+
+export interface BookSnapshot {
+  timestamp: Timestamp;
+  productId: ProductId;
+  bids: BookLevel[];
+  asks: BookLevel[];
 }
 
 export interface Trade {
@@ -31,7 +38,12 @@ export interface Trade {
   side: TradeSide;
   aggressor: "buyer" | "seller" | "unknown";
   traderId?: string;
-  ownTrade?: boolean;
+  traderGroup?: string;
+  tradeType: TradeType;
+}
+
+export interface OwnTrade extends Trade {
+  strategyTag?: string;
 }
 
 export interface IndicatorPoint {
@@ -46,11 +58,60 @@ export interface IndicatorSeries {
   points: IndicatorPoint[];
 }
 
+export interface PnLPoint {
+  timestamp: Timestamp;
+  value: number;
+}
+
+export interface PositionPoint {
+  timestamp: Timestamp;
+  value: number;
+}
+
+export interface LogEntry {
+  id: string;
+  timestamp: Timestamp;
+  productId: ProductId;
+  level: "info" | "warning" | "error";
+  source: string;
+  message: string;
+}
+
+export interface MarketEvent {
+  id: string;
+  timestamp: Timestamp;
+  productId: ProductId;
+  kind: MarketEventKind;
+  price: number;
+  quantity: number;
+  label: string;
+  level?: number;
+  side?: BookSide | TradeSide;
+  tradeType?: TradeType;
+  traderId?: string;
+  traderGroup?: string;
+}
+
 export interface ProductMarketData {
   product: Product;
-  orderBook: OrderBookLevel[];
+  bookSnapshots: BookSnapshot[];
   trades: Trade[];
+  ownTrades: OwnTrade[];
+  pnlSeries: PnLPoint[];
+  positionSeries: PositionPoint[];
   indicators: IndicatorSeries[];
+  logs: LogEntry[];
+}
+
+export interface DatasetMetadata {
+  round?: number;
+  day?: number;
+  priceSource?: string;
+  tradeSource?: string;
+  snapshotCount?: number;
+  tradeCount?: number;
+  ownTradeCount?: number;
+  rowCount?: number;
 }
 
 export interface MarketDataset {
@@ -63,29 +124,30 @@ export interface MarketDataset {
   metadata?: DatasetMetadata;
 }
 
-export interface DatasetMetadata {
-  round?: number;
-  day?: number;
-  priceSource?: string;
-  tradeSource?: string;
-  rowCount?: number;
-  tradeCount?: number;
+export interface ChartViewport {
+  minTimestamp: Timestamp;
+  maxTimestamp: Timestamp;
+  minPrice: number;
+  maxPrice: number;
 }
 
-export interface VisualizationPoint {
-  timestamp: Timestamp;
-  price: number;
-  quantity: number;
-  label: string;
-  side: BookSide | TradeSide;
-  kind: "quote" | "trade";
-  level?: number;
+export interface ChartSeriesBundle {
+  visibleBids: MarketEvent[];
+  visibleAsks: MarketEvent[];
+  visibleTrades: MarketEvent[];
+  visibleOwnTrades: MarketEvent[];
+  visibleEvents: MarketEvent[];
+  visibleIndicators: IndicatorSeries[];
+  fullBounds: ChartViewport;
+  viewport: ChartViewport;
+  filterSummary: string[];
 }
 
-export interface InspectionSnapshot {
-  timestamp: Timestamp | null;
-  productId: ProductId | null;
-  nearestBid: OrderBookLevel | null;
-  nearestAsk: OrderBookLevel | null;
-  nearestTrade: Trade | null;
+export interface TradeFilterSupport {
+  availableTraderIds: string[];
+  availableTraderGroups: string[];
+  supportsTraderIds: boolean;
+  supportsTraderGroups: boolean;
+  minTradeQuantity: number | null;
+  maxTradeQuantity: number | null;
 }

@@ -1,12 +1,13 @@
 import { AppShell } from "../layout/AppShell";
 import { MarketChart } from "../chart/MarketChart";
+import { InspectionStrip } from "../chart/InspectionStrip";
 import { ControlPanel } from "../controls/ControlPanel";
 import { DashboardHeader } from "./DashboardHeader";
 import { InspectionPanel } from "../panels/InspectionPanel";
-import { PlaceholderMetricPanel } from "../panels/PlaceholderMetricPanel";
 import { LogsPanel } from "../panels/LogsPanel";
 import { TutorialOverviewPanel } from "../panels/TutorialOverviewPanel";
 import { PnlPanel } from "../panels/PnlPanel";
+import { PositionPanel } from "../panels/PositionPanel";
 
 export function Dashboard() {
   return (
@@ -16,13 +17,10 @@ export function Dashboard() {
       main={
         <div className="dashboard-main">
           <MarketChart />
+          <InspectionStrip />
           <div className="dashboard-main__grid">
             <PnlPanel />
-            <PlaceholderMetricPanel
-              title="Position"
-              summary="Position state placeholder"
-              note="Tutorial stage files do not include inventory, but this slot is ready for strategy or trader position timelines."
-            />
+            <PositionPanel />
           </div>
         </div>
       }

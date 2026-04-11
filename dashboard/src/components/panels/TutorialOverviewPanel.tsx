@@ -18,12 +18,16 @@ export function TutorialOverviewPanel() {
           <strong>{selectedDataset?.products.length ?? 0}</strong>
         </div>
         <div>
-          <span className="inspection-label">Book Snapshots</span>
-          <strong>{selectedDataset?.metadata?.rowCount ?? 0}</strong>
+          <span className="inspection-label">Snapshots</span>
+          <strong>{selectedDataset?.metadata?.snapshotCount ?? 0}</strong>
         </div>
         <div>
           <span className="inspection-label">Trades</span>
           <strong>{selectedDataset?.metadata?.tradeCount ?? 0}</strong>
+        </div>
+        <div>
+          <span className="inspection-label">Own Trades</span>
+          <strong>{selectedDataset?.metadata?.ownTradeCount ?? 0}</strong>
         </div>
         <div>
           <span className="inspection-label">Selected Product</span>
