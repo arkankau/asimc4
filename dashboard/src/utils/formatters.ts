@@ -23,3 +23,19 @@ export function formatQuantity(quantity: number | null) {
 
   return quantity.toFixed(0);
 }
+
+export function formatPercent(value: number | null) {
+  if (value === null) {
+    return "n/a";
+  }
+
+  return `${(value * 100).toFixed(1)}%`;
+}
+
+export function formatSignedValue(value: number | null, digits = 2) {
+  if (value === null) {
+    return "n/a";
+  }
+
+  return `${value >= 0 ? "+" : ""}${value.toFixed(digits)}`;
+}

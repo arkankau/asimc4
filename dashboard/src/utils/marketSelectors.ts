@@ -7,6 +7,7 @@ import type {
   IndicatorSeries,
   MarketDataset,
   MarketEvent,
+  PnLPoint,
   Product,
   ProductMarketData,
   Timestamp,
@@ -14,6 +15,45 @@ import type {
   OwnTrade,
   TradeFilterSupport,
 } from "../types/market";
+
+export interface PerformanceSummary {
+  finalValue: number | null;
+  maxDrawdown: number | null;
+  maxDrawdownStartTimestamp: number | null;
+  maxDrawdownEndTimestamp: number | null;
+  sharpeLike: number | null;
+  sortinoLike: number | null;
+  profitFactor: number | null;
+  positiveStepRate: number | null;
+  stepCount: number;
+}
+
+export interface TradeTapeRow {
+  id: string;
+  timestamp: number;
+  kind: "market" | "own";
+  side: "buy" | "sell";
+  price: number;
+  quantity: number;
+  tradeType: "maker" | "taker" | "unknown";
+  buyer?: string;
+  seller?: string;
+  traderId?: string;
+  traderGroup?: string;
+}
+
+export interface ProductPerformanceRow {
+  productId: string;
+  displayName: string;
+  finalPnl: number | null;
+  contributionShare: number | null;
+  sharpeLike: number | null;
+  sortinoLike: number | null;
+  maxDrawdown: number | null;
+  positiveStepRate: number | null;
+  ownTradeCount: number;
+  marketTradeCount: number;
+}
 
 function nearestByTimestamp<T extends { timestamp: number }>(items: T[], timestamp: Timestamp | null): T | null {
   if (timestamp === null || items.length === 0) {
@@ -343,6 +383,147 @@ export function getLatestPoint<T extends { timestamp: number }>(points: T[]) {
   return points.length > 0 ? points[points.length - 1] : null;
 }
 
+export function aggregateDatasetPnlSeries(dataset: MarketDataset | null): PnLPoint[] {
+  if (!dataset) {
+    return [];
+  }
+
+  const timestamps = [...new Set(dataset.products.flatMap((product) => product.pnlSeries.map((point) => point.timestamp)))].sort(
+    (left, right) => left - right,
+  );
+
+  if (timestamps.length === 0) {
+    return [];
+  }
+
+  const lastSeen = new Map<string, number>();
+
+  return timestamps.map((timestamp) => {
+    let total = 0;
+
+    for (const product of dataset.products) {
+      const point = product.pnlSeries.find((entry) => entry.timestamp === timestamp);
+      if (point) {
+        lastSeen.set(product.product.id, point.value);
+      }
+
+      total += lastSeen.get(product.product.id) ?? 0;
+    }
+
+    return { timestamp, value: total };
+  });
+}
+
+export function computePerformanceSummary(points: PnLPoint[]): PerformanceSummary {
+  if (points.length === 0) {
+    return {
+      finalValue: null,
+      maxDrawdown: null,
+      maxDrawdownStartTimestamp: null,
+      maxDrawdownEndTimestamp: null,
+      sharpeLike: null,
+      sortinoLike: null,
+      profitFactor: null,
+      positiveStepRate: null,
+      stepCount: 0,
+    };
+  }
+
+  const increments = points.slice(1).map((point, index) => point.value - points[index].value);
+  const finalValue = points[points.length - 1].value;
+
+  let peakValue = points[0].value;
+  let peakTimestamp = points[0].timestamp;
+  let maxDrawdown = 0;
+  let maxDrawdownStartTimestamp = points[0].timestamp;
+  let maxDrawdownEndTimestamp = points[0].timestamp;
+
+  for (const point of points) {
+    if (point.value > peakValue) {
+      peakValue = point.value;
+      peakTimestamp = point.timestamp;
+    }
+
+    const drawdown = peakValue - point.value;
+    if (drawdown > maxDrawdown) {
+      maxDrawdown = drawdown;
+      maxDrawdownStartTimestamp = peakTimestamp;
+      maxDrawdownEndTimestamp = point.timestamp;
+    }
+  }
+
+  if (increments.length === 0) {
+    return {
+      finalValue,
+      maxDrawdown,
+      maxDrawdownStartTimestamp,
+      maxDrawdownEndTimestamp,
+      sharpeLike: null,
+      sortinoLike: null,
+      profitFactor: null,
+      positiveStepRate: null,
+      stepCount: 0,
+    };
+  }
+
+  const meanIncrement = increments.reduce((sum, value) => sum + value, 0) / increments.length;
+  const variance =
+    increments.reduce((sum, value) => sum + (value - meanIncrement) ** 2, 0) / increments.length;
+  const standardDeviation = Math.sqrt(variance);
+  const negativeIncrements = increments.filter((value) => value < 0);
+  const downsideDeviation =
+    negativeIncrements.length > 0
+      ? Math.sqrt(
+          negativeIncrements.reduce((sum, value) => sum + value ** 2, 0) /
+            increments.length,
+        )
+      : 0;
+  const grossProfit = increments.filter((value) => value > 0).reduce((sum, value) => sum + value, 0);
+  const grossLoss = -increments.filter((value) => value < 0).reduce((sum, value) => sum + value, 0);
+
+  return {
+    finalValue,
+    maxDrawdown,
+    maxDrawdownStartTimestamp,
+    maxDrawdownEndTimestamp,
+    sharpeLike:
+      standardDeviation > 0 ? (meanIncrement / standardDeviation) * Math.sqrt(increments.length) : null,
+    sortinoLike:
+      downsideDeviation > 0 ? (meanIncrement / downsideDeviation) * Math.sqrt(increments.length) : null,
+    profitFactor: grossLoss > 0 ? grossProfit / grossLoss : null,
+    positiveStepRate: increments.filter((value) => value > 0).length / increments.length,
+    stepCount: increments.length,
+  };
+}
+
+export function deriveProductPerformanceRows(dataset: MarketDataset | null): ProductPerformanceRow[] {
+  if (!dataset) {
+    return [];
+  }
+
+  const datasetSeries = aggregateDatasetPnlSeries(dataset);
+  const datasetFinal = datasetSeries[datasetSeries.length - 1]?.value ?? null;
+
+  return dataset.products
+    .map((product) => {
+      const summary = computePerformanceSummary(product.pnlSeries);
+      return {
+        productId: product.product.id,
+        displayName: product.product.displayName,
+        finalPnl: summary.finalValue,
+        contributionShare:
+          summary.finalValue !== null && datasetFinal !== null && datasetFinal !== 0 ? summary.finalValue / datasetFinal : null,
+        sharpeLike: summary.sharpeLike,
+        sortinoLike: summary.sortinoLike,
+        maxDrawdown: summary.maxDrawdown,
+        positiveStepRate: summary.positiveStepRate,
+        ownTradeCount: product.ownTrades.length,
+        marketTradeCount: product.trades.length,
+      };
+    })
+    .sort((left, right) => (right.finalPnl ?? Number.NEGATIVE_INFINITY) - (left.finalPnl ?? Number.NEGATIVE_INFINITY));
+}
+
 export function summarizeSnapshot(snapshot: BookSnapshot | null) {
   if (!snapshot) {
     return null;
@@ -368,15 +549,89 @@ export function derivePositionSummary(product: ProductMarketData | null, inspect
   return {
     latest,
     hovered,
+    maxAbsPosition:
+      product?.positionSeries.length ? Math.max(...product.positionSeries.map((point) => Math.abs(point.value))) : null,
+    ownTradeCount: product?.ownTrades.length ?? 0,
+    buyCount: product?.ownTrades.filter((trade) => trade.side === "buy").length ?? 0,
+    sellCount: product?.ownTrades.filter((trade) => trade.side === "sell").length ?? 0,
   };
 }
 
-export function derivePnlSummary(product: ProductMarketData | null, inspection: DashboardInspectionState) {
+export function derivePnlSummary(
+  product: ProductMarketData | null,
+  inspection: DashboardInspectionState,
+  dataset?: MarketDataset | null,
+) {
   const latest = getLatestPoint(product?.pnlSeries ?? []);
   const hovered = nearestByTimestamp(product?.pnlSeries ?? [], inspection.hoveredTimestamp);
+  const datasetSeries = aggregateDatasetPnlSeries(dataset ?? null);
+  const datasetLatest = getLatestPoint(datasetSeries);
+  const productPerformance = computePerformanceSummary(product?.pnlSeries ?? []);
+  const datasetPerformance = computePerformanceSummary(datasetSeries);
 
   return {
     latest,
     hovered,
+    productPerformance,
+    datasetLatest,
+    datasetPerformance,
+    contributionShare:
+      latest && datasetLatest && datasetLatest.value !== 0 ? latest.value / datasetLatest.value : null,
+  };
+}
+
+export function deriveTradeTape(product: ProductMarketData | null, inspection: DashboardInspectionState, limit = 14) {
+  if (!product) {
+    return {
+      rows: [] as TradeTapeRow[],
+      highlightedTradeId: null as string | null,
+    };
+  }
+
+  const rows: TradeTapeRow[] = [
+    ...product.ownTrades.map((trade) => ({
+      id: trade.id,
+      timestamp: trade.timestamp,
+      kind: "own" as const,
+      side: trade.side,
+      price: trade.price,
+      quantity: trade.quantity,
+      tradeType: trade.tradeType,
+      buyer: trade.buyer,
+      seller: trade.seller,
+      traderId: trade.traderId,
+      traderGroup: trade.traderGroup,
+    })),
+    ...product.trades.map((trade) => ({
+      id: trade.id,
+      timestamp: trade.timestamp,
+      kind: "market" as const,
+      side: trade.side,
+      price: trade.price,
+      quantity: trade.quantity,
+      tradeType: trade.tradeType,
+      buyer: trade.buyer,
+      seller: trade.seller,
+      traderId: trade.traderId,
+      traderGroup: trade.traderGroup,
+    })),
+  ];
+
+  const sorted = inspection.hoveredTimestamp !== null
+    ? rows
+        .slice()
+        .sort(
+          (left, right) =>
+            Math.abs(left.timestamp - inspection.hoveredTimestamp!) - Math.abs(right.timestamp - inspection.hoveredTimestamp!) ||
+            right.timestamp - left.timestamp,
+        )
+    : rows.slice().sort((left, right) => right.timestamp - left.timestamp);
+
+  return {
+    rows: sorted.slice(0, limit),
+    highlightedTradeId:
+      inspection.hoveredTimestamp !== null
+        ? nearestByTimestamp(rows, inspection.hoveredTimestamp)?.id ?? null
+        : rows[0]?.id ?? null,
   };
 }

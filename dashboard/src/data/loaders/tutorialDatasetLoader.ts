@@ -10,7 +10,10 @@ import type {
   ProductMarketData,
   Trade,
 } from "../../types/market";
-import type { RawTutorialPriceRow, RawTutorialTradeRow } from "../../types/rawData";
+import type {
+  RawTutorialPriceRow,
+  RawTutorialTradeRow,
+} from "../../types/rawData";
 
 interface TutorialDatasetFileConfig {
   id: string;
@@ -82,7 +85,9 @@ function parseNumber(value: string | undefined) {
   return Number.isFinite(parsed) ? parsed : undefined;
 }
 
-function parseDelimitedCsv(text: string): Array<Record<string, string | undefined>> {
+function parseDelimitedCsv(
+  text: string
+): Array<Record<string, string | undefined>> {
   const lines = text.trim().split(/\r?\n/);
   const [headerLine, ...rows] = lines;
 
@@ -96,7 +101,9 @@ function parseDelimitedCsv(text: string): Array<Record<string, string | undefine
     .filter((row) => row.trim().length > 0)
     .map((row) => {
       const values = row.split(";");
-      return Object.fromEntries(headers.map((header, index) => [header, values[index]?.trim()]));
+      return Object.fromEntries(
+        headers.map((header, index) => [header, values[index]?.trim()])
+      );
     });
 }
 
@@ -118,15 +125,25 @@ function findNearestPriceRow(rows: TutorialPriceRow[], timestamp: number) {
       return row;
     }
 
-    return Math.abs(row.timestamp - timestamp) < Math.abs(closest.timestamp - timestamp) ? row : closest;
+    return Math.abs(row.timestamp - timestamp) <
+      Math.abs(closest.timestamp - timestamp)
+      ? row
+      : closest;
   }, null);
 }
 
-function buildSideLevels(row: TutorialPriceRow, side: "bid" | "ask"): BookLevel[] {
+function buildSideLevels(
+  row: TutorialPriceRow,
+  side: "bid" | "ask"
+): BookLevel[] {
   return ([1, 2, 3] as const)
     .map((level) => {
-      const price = row[`${side}_price_${level}` as keyof TutorialPriceRow] as number | undefined;
-      const quantity = row[`${side}_volume_${level}` as keyof TutorialPriceRow] as number | undefined;
+      const price = row[`${side}_price_${level}` as keyof TutorialPriceRow] as
+        | number
+        | undefined;
+      const quantity = row[
+        `${side}_volume_${level}` as keyof TutorialPriceRow
+      ] as number | undefined;
 
       if (price === undefined || quantity === undefined) {
         return null;
@@ -183,17 +200,21 @@ function buildPositionSeries(rows: TutorialPriceRow[]): PositionPoint[] {
 }
 
 function buildLogs(productId: string, rows: TutorialPriceRow[]): LogEntry[] {
-  return rows.filter((_, index) => index % 30 === 0).map((row, index) => ({
-    id: `${productId}-tutorial-log-${row.timestamp}`,
-    timestamp: row.timestamp,
-    productId,
-    level: "info",
-    source: "tutorial-adapter",
-    message:
-      index % 2 === 0
-        ? `Imported tutorial book snapshot for ${productId} at ${row.timestamp / 1000}s.`
-        : `No external log file yet; this placeholder is generated from normalized tutorial data.`,
-  }));
+  return rows
+    .filter((_, index) => index % 30 === 0)
+    .map((row, index) => ({
+      id: `${productId}-tutorial-log-${row.timestamp}`,
+      timestamp: row.timestamp,
+      productId,
+      level: "info",
+      source: "tutorial-adapter",
+      message:
+        index % 2 === 0
+          ? `Imported tutorial book snapshot for ${productId} at ${
+              row.timestamp / 1000
+            }s.`
+          : `No external log file yet; this placeholder is generated from normalized tutorial data.`,
+    }));
 }
 
 function parsePriceRows(text: string) {
@@ -234,11 +255,19 @@ function parseTradeRows(text: string) {
   }));
 }
 
-function createProductData(productId: string, priceRows: TutorialPriceRow[], tradeRows: TutorialTradeRow[]): ProductMarketData {
+function createProductData(
+  productId: string,
+  priceRows: TutorialPriceRow[],
+  tradeRows: TutorialTradeRow[]
+): ProductMarketData {
   const sortedRows = [...priceRows].sort((a, b) => a.timestamp - b.timestamp);
   const trades: Trade[] = tradeRows.map((trade, index) => {
     const referenceRow = findNearestPriceRow(sortedRows, trade.timestamp);
-    const sideInfo = inferTradeSide(trade.price, referenceRow?.bid_price_1, referenceRow?.ask_price_1);
+    const sideInfo = inferTradeSide(
+      trade.price,
+      referenceRow?.bid_price_1,
+      referenceRow?.ask_price_1
+    );
 
     return {
       id: `${productId}-trade-${trade.timestamp}-${index}`,
@@ -293,7 +322,10 @@ export async function loadTutorialDatasets(): Promise<MarketDataset[]> {
         throw new Error(`Failed to load tutorial files for ${config.name}.`);
       }
 
-      const [pricesText, tradesText] = await Promise.all([pricesResponse.text(), tradesResponse.text()]);
+      const [pricesText, tradesText] = await Promise.all([
+        pricesResponse.text(),
+        tradesResponse.text(),
+      ]);
       const priceRows = parsePriceRows(pricesText);
       const tradeRows = parseTradeRows(tradesText);
 
@@ -302,8 +334,8 @@ export async function loadTutorialDatasets(): Promise<MarketDataset[]> {
         createProductData(
           productId,
           priceRows.filter((row) => row.product === productId),
-          tradeRows.filter((row) => row.symbol === productId),
-        ),
+          tradeRows.filter((row) => row.symbol === productId)
+        )
       );
 
       return {
@@ -321,9 +353,12 @@ export async function loadTutorialDatasets(): Promise<MarketDataset[]> {
           rowCount: priceRows.length,
           snapshotCount: priceRows.length,
           tradeCount: tradeRows.length,
-          ownTradeCount: products.reduce((sum, product) => sum + product.ownTrades.length, 0),
+          ownTradeCount: products.reduce(
+            (sum, product) => sum + product.ownTrades.length,
+            0
+          ),
         },
       };
-    }),
+    })
   );
 }
