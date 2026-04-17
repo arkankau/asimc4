@@ -14,6 +14,10 @@ export function TutorialOverviewPanel() {
           </strong>
         </div>
         <div>
+          <span className="inspection-label">Source</span>
+          <strong>{selectedDataset?.source ?? "n/a"}</strong>
+        </div>
+        <div>
           <span className="inspection-label">Products</span>
           <strong>{selectedDataset?.products.length ?? 0}</strong>
         </div>
@@ -28,6 +32,24 @@ export function TutorialOverviewPanel() {
         <div>
           <span className="inspection-label">Own Trades</span>
           <strong>{selectedDataset?.metadata?.ownTradeCount ?? 0}</strong>
+        </div>
+        <div>
+          <span className="inspection-label">Submission ID</span>
+          <strong>{selectedDataset?.metadata?.submissionId ?? "n/a"}</strong>
+        </div>
+        <div>
+          <span className="inspection-label">Reported Profit</span>
+          <strong>
+            {selectedDataset?.metadata?.reportedProfit !== undefined
+              ? selectedDataset.metadata.reportedProfit.toFixed(2)
+              : "n/a"}
+          </strong>
+        </div>
+        <div>
+          <span className="inspection-label">Status / Logs</span>
+          <strong>
+            {selectedDataset?.metadata?.resultStatus ?? "n/a"} / {selectedDataset?.metadata?.logCount ?? 0}
+          </strong>
         </div>
         <div>
           <span className="inspection-label">Selected Product</span>

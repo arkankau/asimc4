@@ -1,4 +1,5 @@
 import { mockDataset } from "../mock/mockDataset";
+import { loadBundledSubmissionDatasets, tryParseSubmissionResult } from "./imcSubmissionLoader";
 import { loadTutorialDatasets } from "./tutorialDatasetLoader";
 import type {
   BookLevel,
@@ -205,8 +206,13 @@ class InMemoryDatasetRepository implements DatasetRepository {
 
     try {
       const tutorialDatasets = await loadTutorialDatasets();
+      const bundledSubmissionDatasets = await loadBundledSubmissionDatasets();
 
       for (const dataset of tutorialDatasets) {
+        this.datasets.set(dataset.id, dataset);
+      }
+
+      for (const dataset of bundledSubmissionDatasets) {
         this.datasets.set(dataset.id, dataset);
       }
     } catch (error) {
@@ -219,7 +225,7 @@ class InMemoryDatasetRepository implements DatasetRepository {
   async listDatasets() {
     await this.ensureTutorialDatasetsLoaded();
     return [...this.datasets.values()].sort((left, right) => {
-      const sourceRank = { tutorial: 0, upload: 1, mock: 2 } as const;
+      const sourceRank = { submission: 0, tutorial: 1, upload: 2, mock: 3 } as const;
       return sourceRank[left.source] - sourceRank[right.source] || left.name.localeCompare(right.name);
     });
   }
@@ -232,7 +238,16 @@ class InMemoryDatasetRepository implements DatasetRepository {
   async importFile(file: File) {
     const text = await file.text();
     const extension = file.name.split(".").pop()?.toLowerCase();
-    const dataset = extension === "json" ? parseJson(text) : normalizeFlatRows(parseDelimitedRows(text), file.name);
+    const dataset =
+      extension === "log"
+        ? tryParseSubmissionResult(text, file.name, file.name)
+        : extension === "json"
+          ? tryParseSubmissionResult(text, file.name, file.name) ?? parseJson(text)
+          : normalizeFlatRows(parseDelimitedRows(text), file.name);
+
+    if (!dataset) {
+      throw new Error(`Unsupported submission file: ${file.name}`);
+    }
 
     this.datasets.set(dataset.id, dataset);
     return dataset;

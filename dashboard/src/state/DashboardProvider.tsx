@@ -54,7 +54,10 @@ export function DashboardProvider({ children }: PropsWithChildren) {
     }
 
     if (!state.selectedDatasetId) {
-      const preferredDataset = datasets.find((dataset) => dataset.source === "tutorial") ?? datasets[0];
+      const preferredDataset =
+        datasets.find((dataset) => dataset.source === "submission") ??
+        datasets.find((dataset) => dataset.source === "tutorial") ??
+        datasets[0];
       dispatch({ type: "setDataset", datasetId: preferredDataset.id });
       return;
     }

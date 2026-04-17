@@ -6,7 +6,7 @@ export type BookSide = "bid" | "ask";
 export type TradeSide = "buy" | "sell";
 export type MarketEventKind = "bid" | "ask" | "trade" | "ownTrade";
 export type TradeType = "maker" | "taker" | "unknown";
-export type DataSourceKind = "mock" | "upload" | "tutorial";
+export type DataSourceKind = "mock" | "upload" | "tutorial" | "submission";
 
 export interface Product {
   id: ProductId;
@@ -37,6 +37,8 @@ export interface Trade {
   quantity: number;
   side: TradeSide;
   aggressor: "buyer" | "seller" | "unknown";
+  buyer?: string;
+  seller?: string;
   traderId?: string;
   traderGroup?: string;
   tradeType: TradeType;
@@ -106,11 +108,15 @@ export interface ProductMarketData {
 export interface DatasetMetadata {
   round?: number;
   day?: number;
+  submissionId?: string;
+  resultStatus?: string;
+  reportedProfit?: number;
   priceSource?: string;
   tradeSource?: string;
   snapshotCount?: number;
   tradeCount?: number;
   ownTradeCount?: number;
+  logCount?: number;
   rowCount?: number;
 }
 

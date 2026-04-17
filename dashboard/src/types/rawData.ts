@@ -41,3 +41,36 @@ export interface RawTutorialTradeRow {
   price: string;
   quantity: string;
 }
+
+export interface RawSubmissionTradeRow {
+  timestamp: number;
+  buyer?: string;
+  seller?: string;
+  symbol: string;
+  currency?: string;
+  price: number;
+  quantity: number;
+}
+
+export interface RawSubmissionLogRow {
+  timestamp: number;
+  sandboxLog?: string;
+  lambdaLog?: string;
+}
+
+export interface RawSubmissionPositionRow {
+  symbol: string;
+  quantity: number;
+}
+
+export interface RawSubmissionResultPayload {
+  submissionId?: string;
+  round?: string;
+  status?: string;
+  profit?: number;
+  activitiesLog?: string;
+  graphLog?: string;
+  tradeHistory?: RawSubmissionTradeRow[];
+  logs?: RawSubmissionLogRow[];
+  positions?: RawSubmissionPositionRow[];
+}
