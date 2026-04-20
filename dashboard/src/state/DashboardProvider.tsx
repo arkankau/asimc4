@@ -87,6 +87,29 @@ export function DashboardProvider({ children }: PropsWithChildren) {
 
   const tradeFilterSupport = useMemo(() => getTradeFilterSupport(selectedProduct), [selectedProduct]);
 
+  useEffect(() => {
+    const nextTraderGroups = state.filters.selectedTraderGroups.filter((group) =>
+      tradeFilterSupport.availableTraderGroups.includes(group),
+    );
+    const nextTraderIds = state.filters.selectedTraderIds.filter((traderId) =>
+      tradeFilterSupport.availableTraderIds.includes(traderId),
+    );
+
+    if (nextTraderGroups.length !== state.filters.selectedTraderGroups.length) {
+      dispatch({ type: "setSelectedTraderGroups", traderGroups: nextTraderGroups });
+    }
+
+    if (nextTraderIds.length !== state.filters.selectedTraderIds.length) {
+      dispatch({ type: "setSelectedTraderIds", traderIds: nextTraderIds });
+    }
+  }, [
+    dispatch,
+    state.filters.selectedTraderGroups,
+    state.filters.selectedTraderIds,
+    tradeFilterSupport.availableTraderGroups,
+    tradeFilterSupport.availableTraderIds,
+  ]);
+
   const importDataset = async (file: File) => {
     const uploaded = await datasetRepository.importFile(file);
     const available = await datasetRepository.listDatasets();

@@ -4,8 +4,8 @@ import { deriveTradeTape } from "../../utils/marketSelectors";
 import { formatPrice, formatQuantity, formatTimestamp } from "../../utils/formatters";
 
 export function TradeTapePanel() {
-  const { selectedProduct, inspection } = useDashboard();
-  const { rows, highlightedTradeId } = deriveTradeTape(selectedProduct, inspection);
+  const { selectedProduct, inspection, state } = useDashboard();
+  const { rows, highlightedTradeId } = deriveTradeTape(selectedProduct, inspection, state);
 
   return (
     <Panel
@@ -18,7 +18,7 @@ export function TradeTapePanel() {
     >
       {rows.length === 0 ? (
         <div className="metric-copy">
-          <p>No trade history is available for this product in the current dataset.</p>
+          <p>No trades match the current filters for this product.</p>
         </div>
       ) : (
         <div className="trade-tape">
@@ -31,6 +31,7 @@ export function TradeTapePanel() {
                 <strong>{formatTimestamp(row.timestamp)}</strong>
                 <span className={`trade-chip trade-chip--${row.kind}`}>{row.kind === "own" ? "OWN" : "MKT"}</span>
                 <span className={`trade-chip trade-chip--${row.side}`}>{row.side.toUpperCase()}</span>
+                {row.traderClass ? <span className={`trade-chip trade-chip--class-${row.traderClass}`}>{row.traderClass}</span> : null}
               </div>
               <div className="trade-tape__stats">
                 <span>{formatPrice(row.price)}</span>

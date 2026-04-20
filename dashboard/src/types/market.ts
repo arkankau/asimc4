@@ -6,6 +6,7 @@ export type BookSide = "bid" | "ask";
 export type TradeSide = "buy" | "sell";
 export type MarketEventKind = "bid" | "ask" | "trade" | "ownTrade";
 export type TradeType = "maker" | "taker" | "unknown";
+export type TraderClass = "M" | "S" | "B" | "I" | "F";
 export type DataSourceKind = "mock" | "upload" | "tutorial" | "submission";
 
 export interface Product {
@@ -41,6 +42,7 @@ export interface Trade {
   seller?: string;
   traderId?: string;
   traderGroup?: string;
+  traderClass?: TraderClass;
   tradeType: TradeType;
 }
 
@@ -90,8 +92,11 @@ export interface MarketEvent {
   level?: number;
   side?: BookSide | TradeSide;
   tradeType?: TradeType;
+  buyer?: string;
+  seller?: string;
   traderId?: string;
   traderGroup?: string;
+  traderClass?: TraderClass;
 }
 
 export interface ProductMarketData {
@@ -152,8 +157,12 @@ export interface ChartSeriesBundle {
 export interface TradeFilterSupport {
   availableTraderIds: string[];
   availableTraderGroups: string[];
+  availableTraderClasses: TraderClass[];
+  traderClassCounts: Record<TraderClass, number>;
   supportsTraderIds: boolean;
   supportsTraderGroups: boolean;
   minTradeQuantity: number | null;
   maxTradeQuantity: number | null;
+  bigTradeThreshold: number | null;
+  usesInferredTraderClasses: boolean;
 }

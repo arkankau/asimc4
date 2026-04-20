@@ -277,15 +277,15 @@ function buildTrades(
       seller: trade.seller || undefined,
       traderId:
         trade.buyer === "SUBMISSION"
-          ? trade.seller || trade.currency || "market"
+          ? trade.seller || undefined
           : trade.seller === "SUBMISSION"
-            ? trade.buyer || trade.currency || "market"
-            : trade.buyer || trade.seller || trade.currency || undefined,
+            ? trade.buyer || undefined
+            : trade.buyer || trade.seller || undefined,
       traderGroup: trade.buyer === "SUBMISSION" || trade.seller === "SUBMISSION" ? "submission" : "market",
       tradeType: trade.buyer === "SUBMISSION" || trade.seller === "SUBMISSION"
         ? "maker"
         : sideInfo.aggressor === "unknown"
-          ? "unknown"
+          ? "maker"
           : "taker",
     } satisfies Trade;
 

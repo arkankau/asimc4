@@ -1,16 +1,20 @@
-from datamodel import OrderDepth, TradingState, Order
-from typing import List
+from datamodel import OrderDepth, Order, TradingState
+from typing import Any, Dict, List, Optional
 import json
+import math
 
 
 class Trader:
-
     POSITION_LIMIT = 80
-
-    # Pepper parameters
-    PEPPER_MA_WINDOW = 20        # ticks to compute moving average
-    PEPPER_TRAIL_STOP = 30       # sell if price drops this much from peak
-    PEPPER_EARLY_CUTOFF = 300000 # aggressive buying in first ~30% of day
+    PEPPER_HISTORY = 160
+    PEPPER_SHORT_WINDOW = 24
+    PEPPER_LONG_WINDOW = 96
+    PEPPER_SLOPE_WINDOW = 48
+    PEPPER_WEAK_CONFIRM = 6
+    PEPPER_BREAK_CONFIRM = 4
+    PEPPER_CORE_TARGET = POSITION_LIMIT // 2
+    PEPPER_WARMUP_TARGET = 60
+    PEPPER_PASSIVE_SIZE = 20
 
     def run(self, state: TradingState):
         result = {}
@@ -21,113 +25,186 @@ class Trader:
 
         return result, 0, json.dumps(trader_data)
 
-    def _load_data(self, raw: str) -> dict:
+    def _load_data(self, raw: str) -> Dict[str, Any]:
         if raw:
             try:
-                return json.loads(raw)
+                parsed = json.loads(raw)
+                if isinstance(parsed, dict):
+                    prices = parsed.get("prices", parsed.get("pepper_prices", []))
+                    if not isinstance(prices, list):
+                        prices = []
+                    return {
+                        "prices": prices[-self.PEPPER_HISTORY :],
+                        "peak": parsed.get("peak", parsed.get("pepper_peak")),
+                        "weak_count": int(parsed.get("weak_count", parsed.get("pepper_weak_count", 0)) or 0),
+                        "break_count": int(parsed.get("break_count", parsed.get("pepper_break_count", 0)) or 0),
+                    }
             except (json.JSONDecodeError, TypeError):
                 pass
-        return {"pepper_prices": [], "pepper_peak": 0}
 
-    # -------------------------------------------------------------------------
-    # INTARIAN_PEPPER_ROOT
-    #
-    # Price trends up ~1000/day.  Three improvements over "buy everything":
-    #   1. Early aggressive buying  – first 30% of the day
-    #   2. Moving-average guard     – skip buying if mid < MA
-    #   3. Trailing stop            – sell if price drops >TRAIL_STOP from peak
-    # -------------------------------------------------------------------------
+        return {"prices": [], "peak": None, "weak_count": 0, "break_count": 0}
 
-    def _trade_pepper(self, state: TradingState, data: dict) -> List[Order]:
+    def _trade_pepper(self, state: TradingState, data: Dict[str, Any]) -> List[Order]:
         product = "INTARIAN_PEPPER_ROOT"
-        order_depth = state.order_depths[product]
-        orders: List[Order] = []
+        od = state.order_depths[product]
         position = state.position.get(product, 0)
+        orders: List[Order] = []
 
-        mid = self._mid_price(order_depth)
+        mid = self._mid_price(od)
         if mid is None:
             return orders
 
-        prices = data.get("pepper_prices", [])
+        prices = data.get("prices", [])
         prices.append(mid)
-        if len(prices) > self.PEPPER_MA_WINDOW:
-            prices = prices[-self.PEPPER_MA_WINDOW:]
-        data["pepper_prices"] = prices
+        prices = prices[-self.PEPPER_HISTORY :]
+        data["prices"] = prices
 
-        peak = data.get("pepper_peak", 0)
-        if mid > peak:
+        peak = data.get("peak")
+        if position <= 0 or peak is None:
             peak = mid
-        data["pepper_peak"] = peak
-
-        ma = sum(prices) / len(prices)
-
-        # Trailing stop: sell if price collapsed from peak
-        if peak - mid > self.PEPPER_TRAIL_STOP and position > 0:
-            return self._sell_pepper(order_depth, product, position)
-
-        early_phase = state.timestamp < self.PEPPER_EARLY_CUTOFF
-        trend_ok = mid >= ma
-
-        if early_phase:
-            return self._buy_pepper_aggressive(order_depth, product, position)
-        elif trend_ok:
-            return self._buy_pepper_conservative(order_depth, product, position)
         else:
-            return orders
+            peak = max(float(peak), mid)
+        data["peak"] = peak
 
-    def _buy_pepper_aggressive(self, od: OrderDepth, product: str, position: int) -> List[Order]:
-        orders: List[Order] = []
-        cap = self.POSITION_LIMIT - position
+        short_ma = self._window_mean(prices, self.PEPPER_SHORT_WINDOW)
+        long_ma = self._window_mean(prices, self.PEPPER_LONG_WINDOW)
+        slope = self._window_slope(prices, self.PEPPER_SLOPE_WINDOW)
+        avg_abs_ret = self._avg_abs_return(prices, self.PEPPER_SLOPE_WINDOW)
+        spread = self._spread(od, default=4.0)
 
-        for ask in sorted(od.sell_orders.keys()):
-            if cap <= 0:
-                break
-            qty = min(cap, -od.sell_orders[ask])
-            orders.append(Order(product, ask, qty))
-            cap -= qty
+        trail = max(8.0, 6.0 * avg_abs_ret + spread)
+        strong_trend = short_ma >= long_ma and slope > 0 and mid >= short_ma - spread / 2.0
+        weakening = short_ma < long_ma or slope <= 0
+        broken_trend = (
+            short_ma + max(1.0, avg_abs_ret) < long_ma
+            or slope < -0.25 * max(1.0, avg_abs_ret)
+            or peak - mid > trail
+        )
 
-        if cap > 0 and od.buy_orders:
-            best_bid = max(od.buy_orders.keys())
-            orders.append(Order(product, best_bid + 1, cap))
+        weak_count = int(data.get("weak_count", 0))
+        break_count = int(data.get("break_count", 0))
+        weak_count = weak_count + 1 if weakening else max(0, weak_count - 1)
+        break_count = break_count + 1 if broken_trend else 0
+        data["weak_count"] = weak_count
+        data["break_count"] = break_count
 
-        return orders
+        if len(prices) < self.PEPPER_SHORT_WINDOW // 2:
+            target = self.PEPPER_WARMUP_TARGET
+        elif break_count >= self.PEPPER_BREAK_CONFIRM:
+            target = 0
+        elif strong_trend:
+            target = self.POSITION_LIMIT
+        elif weak_count >= self.PEPPER_WEAK_CONFIRM:
+            target = self.PEPPER_CORE_TARGET if slope >= 0 else 0
+        else:
+            target = self.PEPPER_CORE_TARGET
 
-    def _buy_pepper_conservative(self, od: OrderDepth, product: str, position: int) -> List[Order]:
-        orders: List[Order] = []
-        cap = self.POSITION_LIMIT - position
+        drift_bonus = max(0.0, slope) * min(12, max(1, len(prices) // 8))
+        fair = max(mid, short_ma) + drift_bonus
+        if break_count >= self.PEPPER_BREAK_CONFIRM:
+            fair = min(mid, short_ma)
 
-        for ask in sorted(od.sell_orders.keys()):
-            if cap <= 0:
-                break
-            qty = min(cap, -od.sell_orders[ask])
-            orders.append(Order(product, ask, qty))
-            cap -= qty
+        buy_cap = max(0, target - position)
+        sell_cap = max(0, position - target)
+        bought = 0
+        sold = 0
 
-        return orders
+        if sell_cap > 0:
+            exit_floor = fair - (0 if break_count >= self.PEPPER_BREAK_CONFIRM else 1)
+            for bid in sorted(od.buy_orders, reverse=True):
+                if sell_cap - sold <= 0:
+                    break
+                if break_count < self.PEPPER_BREAK_CONFIRM and bid < exit_floor:
+                    break
+                qty = min(od.buy_orders[bid], sell_cap - sold)
+                if qty <= 0:
+                    continue
+                orders.append(Order(product, bid, -qty))
+                sold += qty
 
-    def _sell_pepper(self, od: OrderDepth, product: str, position: int) -> List[Order]:
-        orders: List[Order] = []
-        remaining = position
+        rotation_floor = self.PEPPER_CORE_TARGET if strong_trend else target
+        if position + bought - sold > rotation_floor and od.buy_orders:
+            rotation_trigger = fair + max(1.0, spread / 2.0)
+            for bid in sorted(od.buy_orders, reverse=True):
+                surplus = (position + bought - sold) - rotation_floor
+                if surplus <= 0 or bid < rotation_trigger:
+                    break
+                qty = min(od.buy_orders[bid], surplus)
+                if qty <= 0:
+                    continue
+                orders.append(Order(product, bid, -qty))
+                sold += qty
 
-        for bid in sorted(od.buy_orders.keys(), reverse=True):
-            if remaining <= 0:
-                break
-            qty = min(remaining, od.buy_orders[bid])
-            orders.append(Order(product, bid, -qty))
-            remaining -= qty
+        if buy_cap > 0 and od.sell_orders:
+            buy_limit = fair + (1 if strong_trend else 0)
+            for ask in sorted(od.sell_orders):
+                if buy_cap - bought <= 0 or ask > buy_limit:
+                    break
+                qty = min(-od.sell_orders[ask], buy_cap - bought)
+                if qty <= 0:
+                    continue
+                orders.append(Order(product, ask, qty))
+                bought += qty
 
-        if remaining > 0 and od.sell_orders:
-            best_ask = min(od.sell_orders.keys())
-            orders.append(Order(product, best_ask - 1, -remaining))
+        best_bid = max(od.buy_orders) if od.buy_orders else None
+        best_ask = min(od.sell_orders) if od.sell_orders else None
+        remaining_buy = buy_cap - bought
+        remaining_sell = max(0, (position + bought - sold) - target)
+
+        if remaining_buy > 0 and best_bid is not None:
+            passive_bid = min(best_bid + 1, int(math.floor(fair)))
+            if best_ask is None or passive_bid < best_ask:
+                orders.append(
+                    Order(product, passive_bid, min(self.PEPPER_PASSIVE_SIZE, remaining_buy))
+                )
+
+        if remaining_sell > 0 and best_ask is not None:
+            passive_ask = max(best_ask - 1, int(math.ceil(fair)))
+            if best_bid is None or passive_ask > best_bid:
+                orders.append(
+                    Order(product, passive_ask, -min(self.PEPPER_PASSIVE_SIZE, remaining_sell))
+                )
 
         return orders
 
     @staticmethod
-    def _mid_price(od: OrderDepth):
+    def _mid_price(od: OrderDepth) -> Optional[float]:
         if od.buy_orders and od.sell_orders:
-            return (max(od.buy_orders.keys()) + min(od.sell_orders.keys())) / 2
+            return (max(od.buy_orders) + min(od.sell_orders)) / 2.0
         if od.buy_orders:
-            return max(od.buy_orders.keys())
+            return float(max(od.buy_orders))
         if od.sell_orders:
-            return min(od.sell_orders.keys())
+            return float(min(od.sell_orders))
         return None
+
+    @staticmethod
+    def _spread(od: OrderDepth, default: float) -> float:
+        if od.buy_orders and od.sell_orders:
+            return float(min(od.sell_orders) - max(od.buy_orders))
+        return default
+
+    @staticmethod
+    def _window_mean(values: List[float], window: int) -> float:
+        sample = values[-window:] if len(values) > window else values
+        return sum(sample) / len(sample)
+
+    @staticmethod
+    def _avg_abs_return(values: List[float], window: int) -> float:
+        sample = values[-window:] if len(values) > window else values
+        if len(sample) < 2:
+            return 1.0
+        returns = [abs(sample[i] - sample[i - 1]) for i in range(1, len(sample))]
+        avg = sum(returns) / len(returns)
+        return avg if avg > 0 else 1.0
+
+    @staticmethod
+    def _window_slope(values: List[float], window: int) -> float:
+        sample = values[-window:] if len(values) > window else values
+        n = len(sample)
+        if n < 2:
+            return 0.0
+        x_mean = (n - 1) / 2.0
+        y_mean = sum(sample) / n
+        numerator = sum((idx - x_mean) * (sample[idx] - y_mean) for idx in range(n))
+        denominator = sum((idx - x_mean) ** 2 for idx in range(n))
+        return numerator / denominator if denominator else 0.0

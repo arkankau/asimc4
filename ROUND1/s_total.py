@@ -1,225 +1,269 @@
-from datamodel import OrderDepth, TradingState, Order
-from typing import List
 import json
+import math
+from datamodel import OrderDepth, TradingState, Order
+from typing import List, Optional
 
 
 class Trader:
+    """
+    v12 — IPR: dynamic trend-follow with trailing stop. ACO: EMA + position skew.
+    EMA empirically beats wall inference on ACO (two bot tiers with different spreads).
+    """
 
     POSITION_LIMIT = 80
 
-    # Pepper parameters
-    PEPPER_MA_WINDOW = 20
-    PEPPER_TRAIL_STOP = 30
-    PEPPER_EARLY_CUTOFF = 300000
+    IPR = "INTARIAN_PEPPER_ROOT"
+    ACO = "ASH_COATED_OSMIUM"
 
-    # Osmium parameters - fixed fair value market-making
-    FAIR_VALUE = 10000
-    POSITION_SKEW = 0.15
-    TAKE_THRESHOLD = 2
-    TIGHT_SPREAD_THRESHOLD = 14
+    # IPR — structural ratios
+    IPR_HISTORY = 160
+    IPR_SHORT_RATIO = 0.15          # short MA = 15% of history
+    IPR_LONG_RATIO = 0.60           # long MA  = 60% of history
+    IPR_SLOPE_RATIO = 0.30          # slope window = 30% of history
+    IPR_BREAK_CONFIRM = 4
+
+    # ACO — EMA fair value
+    ACO_EMA_ALPHA = 0.002           # ~500-tick half-life, tracks anchor not noise
+    ACO_WARMUP = 50                 # let EMA stabilize before trading
+    ACO_POSITION_SKEW = 0.10        # skew fair value per unit of position
 
     def run(self, state: TradingState):
+        try:
+            memory = json.loads(state.traderData) if state.traderData else {}
+        except Exception:
+            memory = {}
+
         result = {}
-        trader_data = self._load_data(state.traderData)
 
-        for product in state.order_depths:
-            if product == "INTARIAN_PEPPER_ROOT":
-                result[product] = self._trade_pepper(state, trader_data)
-            elif product == "ASH_COATED_OSMIUM":
-                result[product] = self._trade_osmium(state, trader_data)
+        if self.IPR in state.order_depths:
+            result[self.IPR], memory = self._trade_ipr(state, memory)
 
-        return result, 0, json.dumps(trader_data)
+        if self.ACO in state.order_depths:
+            result[self.ACO], memory = self._trade_aco(state, memory)
 
-    # -------------------------------------------------------------------------
-    # State persistence
-    # -------------------------------------------------------------------------
+        return result, 0, json.dumps(memory)
 
-    def _load_data(self, raw: str) -> dict:
-        if raw:
-            try:
-                return json.loads(raw)
-            except (json.JSONDecodeError, TypeError):
-                pass
-        return {"pepper_prices": [], "pepper_peak": 0, "last_mid": None}
+    # =========================================================================
+    # IPR — Trend-follow, buy full immediately, exit on break
+    # =========================================================================
 
-    # -------------------------------------------------------------------------
-    # INTARIAN_PEPPER_ROOT
-    # -------------------------------------------------------------------------
-
-    def _trade_pepper(self, state: TradingState, data: dict) -> List[Order]:
-        product = "INTARIAN_PEPPER_ROOT"
-        order_depth = state.order_depths[product]
-        orders: List[Order] = []
+    def _trade_ipr(self, state: TradingState, memory: dict):
+        product = self.IPR
+        od = state.order_depths[product]
         position = state.position.get(product, 0)
+        orders: List[Order] = []
 
-        mid = self._mid_price(order_depth)
+        mid = self._mid_price(od)
         if mid is None:
-            return orders
+            return orders, memory
 
-        prices = data.get("pepper_prices", [])
+        # --- Price history ---
+        prices = memory.get("ipr_prices", [])
         prices.append(mid)
-        if len(prices) > self.PEPPER_MA_WINDOW:
-            prices = prices[-self.PEPPER_MA_WINDOW:]
-        data["pepper_prices"] = prices
+        prices = prices[-self.IPR_HISTORY:]
+        memory["ipr_prices"] = prices
 
-        peak = data.get("pepper_peak", 0)
-        if mid > peak:
+        # --- Trailing peak ---
+        peak = memory.get("ipr_peak")
+        if position <= 0 or peak is None:
             peak = mid
-        data["pepper_peak"] = peak
-
-        ma = sum(prices) / len(prices)
-
-        if peak - mid > self.PEPPER_TRAIL_STOP and position > 0:
-            return self._sell_pepper(order_depth, product, position)
-
-        early_phase = state.timestamp < self.PEPPER_EARLY_CUTOFF
-        trend_ok = mid >= ma
-
-        if early_phase:
-            return self._buy_pepper_aggressive(order_depth, product, position)
-        elif trend_ok:
-            return self._buy_pepper_conservative(order_depth, product, position)
         else:
-            return orders
+            peak = max(float(peak), mid)
+        memory["ipr_peak"] = peak
 
-    def _buy_pepper_aggressive(self, od: OrderDepth, product: str, position: int) -> List[Order]:
-        orders: List[Order] = []
-        cap = self.POSITION_LIMIT - position
+        # --- Dynamic windows from history length ---
+        n = len(prices)
+        short_w = max(2, int(self.IPR_HISTORY * self.IPR_SHORT_RATIO))
+        long_w = max(short_w + 1, int(self.IPR_HISTORY * self.IPR_LONG_RATIO))
+        slope_w = max(2, int(self.IPR_HISTORY * self.IPR_SLOPE_RATIO))
 
-        for ask in sorted(od.sell_orders.keys()):
-            if cap <= 0:
-                break
-            qty = min(cap, -od.sell_orders[ask])
-            orders.append(Order(product, ask, qty))
-            cap -= qty
+        # --- Indicators ---
+        short_ma = self._window_mean(prices, short_w)
+        long_ma = self._window_mean(prices, long_w)
+        slope = self._window_slope(prices, slope_w)
+        vol = self._avg_abs_return(prices, slope_w)
+        spread = self._spread_val(od, default=vol * 2)
 
-        if cap > 0 and od.buy_orders:
-            best_bid = max(od.buy_orders.keys())
-            orders.append(Order(product, best_bid + 1, cap))
+        # --- Trend classification (all thresholds in vol/spread units) ---
+        trail_dist = vol * 6 + spread         # trail = ~6 sigma + spread
+        strong = (
+            short_ma >= long_ma
+            and slope > 0
+            and mid >= short_ma - spread / 2
+        )
+        broken = (
+            short_ma + vol < long_ma           # short fell below long by 1 vol
+            or slope < -vol / 4                # slope negative by quarter vol
+            or peak - mid > trail_dist         # drawdown from peak
+        )
 
-        return orders
+        break_count = int(memory.get("ipr_break_count", 0))
+        break_count = break_count + 1 if broken else 0
+        memory["ipr_break_count"] = break_count
 
-    def _buy_pepper_conservative(self, od: OrderDepth, product: str, position: int) -> List[Order]:
-        orders: List[Order] = []
-        cap = self.POSITION_LIMIT - position
+        # --- Position target: full from start, exit on confirmed break ---
+        if break_count >= self.IPR_BREAK_CONFIRM:
+            target = 0
+        else:
+            target = self.POSITION_LIMIT
 
-        for ask in sorted(od.sell_orders.keys()):
-            if cap <= 0:
-                break
-            qty = min(cap, -od.sell_orders[ask])
-            orders.append(Order(product, ask, qty))
-            cap -= qty
+        # --- Fair value ---
+        fair = max(mid, short_ma)
+        if break_count >= self.IPR_BREAK_CONFIRM:
+            fair = min(mid, short_ma)
 
-        return orders
+        buy_cap = max(0, target - position)
+        sell_cap = max(0, position - target)
+        bought = 0
+        sold = 0
 
-    def _sell_pepper(self, od: OrderDepth, product: str, position: int) -> List[Order]:
-        orders: List[Order] = []
-        remaining = position
+        # --- Sell toward target ---
+        if sell_cap > 0 and od.buy_orders:
+            exit_floor = fair - (0 if break_count >= self.IPR_BREAK_CONFIRM else spread / 4)
+            for bid in sorted(od.buy_orders, reverse=True):
+                if sold >= sell_cap:
+                    break
+                if break_count < self.IPR_BREAK_CONFIRM and bid < exit_floor:
+                    break
+                qty = min(od.buy_orders[bid], sell_cap - sold)
+                if qty > 0:
+                    orders.append(Order(product, bid, -qty))
+                    sold += qty
 
-        for bid in sorted(od.buy_orders.keys(), reverse=True):
-            if remaining <= 0:
-                break
-            qty = min(remaining, od.buy_orders[bid])
-            orders.append(Order(product, bid, -qty))
-            remaining -= qty
+        # --- Buy toward target ---
+        if buy_cap > 0 and od.sell_orders:
+            buy_limit = fair + (spread / 4 if strong else 0)
+            for ask in sorted(od.sell_orders):
+                if bought >= buy_cap or ask > buy_limit:
+                    break
+                qty = min(-od.sell_orders[ask], buy_cap - bought)
+                if qty > 0:
+                    orders.append(Order(product, ask, qty))
+                    bought += qty
 
-        if remaining > 0 and od.sell_orders:
-            best_ask = min(od.sell_orders.keys())
-            orders.append(Order(product, best_ask - 1, -remaining))
+        # --- Passive quotes ---
+        best_bid = max(od.buy_orders) if od.buy_orders else None
+        best_ask = min(od.sell_orders) if od.sell_orders else None
+        remaining_buy = buy_cap - bought
+        remaining_sell = max(0, (position + bought - sold) - target)
+        passive_size = max(1, self.POSITION_LIMIT // 4)
 
-        return orders
+        if remaining_buy > 0 and best_bid is not None:
+            passive_bid = min(best_bid + 1, int(math.floor(fair)))
+            if best_ask is None or passive_bid < best_ask:
+                orders.append(
+                    Order(product, passive_bid, min(passive_size, remaining_buy))
+                )
 
-    # -------------------------------------------------------------------------
-    # ASH_COATED_OSMIUM - Fixed fair value market-making
-    # -------------------------------------------------------------------------
+        if remaining_sell > 0 and best_ask is not None:
+            passive_ask = max(best_ask - 1, int(math.ceil(fair)))
+            if best_bid is None or passive_ask > best_bid:
+                orders.append(
+                    Order(product, passive_ask, -min(passive_size, remaining_sell))
+                )
 
-    def _trade_osmium(self, state: TradingState, data: dict) -> List[Order]:
-        product = "ASH_COATED_OSMIUM"
+        return orders, memory
+
+    # =========================================================================
+    # ACO — Market-make around EMA fair value with position skew
+    # =========================================================================
+
+    def _trade_aco(self, state: TradingState, memory: dict):
+        product = self.ACO
         od = state.order_depths[product]
         orders: List[Order] = []
+
+        if not od.buy_orders or not od.sell_orders:
+            return orders, memory
+
+        mid = (max(od.buy_orders) + min(od.sell_orders)) / 2
+
+        # --- EMA fair value ---
+        aco_ticks = memory.get("aco_ticks", 0)
+        fv = memory.get("aco_fv", mid)
+        fv = (1 - self.ACO_EMA_ALPHA) * fv + self.ACO_EMA_ALPHA * mid
+        aco_ticks += 1
+        memory["aco_fv"] = fv
+        memory["aco_ticks"] = aco_ticks
+
+        if aco_ticks < self.ACO_WARMUP:
+            return orders, memory
+
+        # --- Position-skewed fair value ---
         position = state.position.get(product, 0)
+        fair = fv - position * self.ACO_POSITION_SKEW
+
         buy_cap = self.POSITION_LIMIT - position
         sell_cap = self.POSITION_LIMIT + position
 
-        if not od.sell_orders and not od.buy_orders:
-            return orders
-
-        best_bid = max(od.buy_orders.keys()) if od.buy_orders else None
-        best_ask = min(od.sell_orders.keys()) if od.sell_orders else None
-        mid = (best_bid + best_ask) / 2 if (best_bid and best_ask) else (best_bid or best_ask)
-
-        last_mid = data.get("last_mid")
-        data["last_mid"] = mid
-
-        fair = self.FAIR_VALUE - position * self.POSITION_SKEW
-
-        spread = (best_ask - best_bid) if (best_ask and best_bid) else 999
-        tight_spread = spread < self.TIGHT_SPREAD_THRESHOLD
-
-        last_delta = (mid - last_mid) if last_mid is not None else 0
-
-        # LAYER 1: Take mispriced NPC levels
-        take_fair = fair - self.TAKE_THRESHOLD if not tight_spread else fair
-        for ask_price in sorted(od.sell_orders.keys()):
-            if ask_price >= take_fair or buy_cap <= 0:
+        # --- Take: asks below fair, bids above fair ---
+        for ask in sorted(od.sell_orders):
+            if ask >= fair or buy_cap <= 0:
                 break
-            qty = min(buy_cap, -od.sell_orders[ask_price])
-            orders.append(Order(product, ask_price, qty))
+            qty = min(buy_cap, abs(od.sell_orders[ask]))
+            orders.append(Order(product, ask, qty))
             buy_cap -= qty
 
-        take_fair_sell = fair + self.TAKE_THRESHOLD if not tight_spread else fair
-        for bid_price in sorted(od.buy_orders.keys(), reverse=True):
-            if bid_price <= take_fair_sell or sell_cap <= 0:
+        for bid in sorted(od.buy_orders, reverse=True):
+            if bid <= fair or sell_cap <= 0:
                 break
-            qty = min(sell_cap, od.buy_orders[bid_price])
-            orders.append(Order(product, bid_price, -qty))
+            qty = min(sell_cap, od.buy_orders[bid])
+            orders.append(Order(product, bid, -qty))
             sell_cap -= qty
 
-        # LAYER 2: During tight spread, trade into the mean-reversion
-        if tight_spread and best_bid and best_ask:
-            if mid < self.FAIR_VALUE - 2 and buy_cap > 0:
-                for ask_price in sorted(od.sell_orders.keys()):
-                    if buy_cap <= 0 or ask_price > self.FAIR_VALUE:
-                        break
-                    qty = min(buy_cap, -od.sell_orders[ask_price])
-                    orders.append(Order(product, ask_price, qty))
-                    buy_cap -= qty
+        # --- Make: one tick inside best, gated by fair ---
+        our_bid = max(od.buy_orders) + 1
+        our_ask = min(od.sell_orders) - 1
 
-            elif mid > self.FAIR_VALUE + 2 and sell_cap > 0:
-                for bid_price in sorted(od.buy_orders.keys(), reverse=True):
-                    if sell_cap <= 0 or bid_price < self.FAIR_VALUE:
-                        break
-                    qty = min(sell_cap, od.buy_orders[bid_price])
-                    orders.append(Order(product, bid_price, -qty))
-                    sell_cap -= qty
+        if buy_cap > 0 and our_bid < fair:
+            orders.append(Order(product, our_bid, buy_cap))
+        if sell_cap > 0 and our_ask > fair:
+            orders.append(Order(product, our_ask, -sell_cap))
 
-        # LAYER 3: Post resting quotes inside the spread
-        if best_bid and best_ask:
-            our_bid = best_bid + 1
-            our_ask = best_ask - 1
+        return orders, memory
 
-            if last_delta > 0:
-                our_ask = max(our_ask - 1, int(fair) + 1)
-            elif last_delta < 0:
-                our_bid = min(our_bid + 1, int(fair) - 1)
-
-            if our_bid < fair and buy_cap > 0:
-                orders.append(Order(product, our_bid, buy_cap))
-            if our_ask > fair and sell_cap > 0:
-                orders.append(Order(product, our_ask, -sell_cap))
-
-        return orders
-
-    # -------------------------------------------------------------------------
-    # Helpers
-    # -------------------------------------------------------------------------
+    # =========================================================================
+    # Shared helpers
+    # =========================================================================
 
     @staticmethod
-    def _mid_price(od: OrderDepth):
+    def _mid_price(od: OrderDepth) -> Optional[float]:
         if od.buy_orders and od.sell_orders:
-            return (max(od.buy_orders.keys()) + min(od.sell_orders.keys())) / 2
+            return (max(od.buy_orders) + min(od.sell_orders)) / 2.0
         if od.buy_orders:
-            return max(od.buy_orders.keys())
+            return float(max(od.buy_orders))
         if od.sell_orders:
-            return min(od.sell_orders.keys())
+            return float(min(od.sell_orders))
         return None
+
+    @staticmethod
+    def _spread_val(od: OrderDepth, default=None):
+        if od.buy_orders and od.sell_orders:
+            return float(min(od.sell_orders) - max(od.buy_orders))
+        return default
+
+    @staticmethod
+    def _window_mean(values: list, window: int) -> float:
+        sample = values[-window:] if len(values) > window else values
+        return sum(sample) / len(sample)
+
+    @staticmethod
+    def _window_slope(values: list, window: int) -> float:
+        sample = values[-window:] if len(values) > window else values
+        n = len(sample)
+        if n < 2:
+            return 0.0
+        x_mean = (n - 1) / 2.0
+        y_mean = sum(sample) / n
+        num = sum((i - x_mean) * (sample[i] - y_mean) for i in range(n))
+        den = sum((i - x_mean) ** 2 for i in range(n))
+        return num / den if den else 0.0
+
+    @staticmethod
+    def _avg_abs_return(values: list, window: int) -> float:
+        sample = values[-window:] if len(values) > window else values
+        if len(sample) < 2:
+            return 1.0
+        returns = [abs(sample[i] - sample[i - 1]) for i in range(1, len(sample))]
+        avg = sum(returns) / len(returns)
+        return avg if avg > 0 else 1.0

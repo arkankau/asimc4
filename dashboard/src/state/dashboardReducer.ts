@@ -1,4 +1,7 @@
 import type { DashboardAction, DashboardInspectionState, DashboardState } from "../types/dashboard";
+import type { TraderClass } from "../types/market";
+
+const DEFAULT_TRADER_CLASSES: TraderClass[] = ["M", "S", "B", "I", "F"];
 
 export const emptyInspectionState: DashboardInspectionState = {
   hoveredTimestamp: null,
@@ -11,6 +14,8 @@ export const emptyInspectionState: DashboardInspectionState = {
   nearestVisibleAsk: null,
   nearestVisibleTrade: null,
   nearestVisibleOwnTrade: null,
+  visibleTradesAtHoveredTimestamp: [],
+  visibleOwnTradesAtHoveredTimestamp: [],
   activeFilterSummary: [],
 };
 
@@ -30,9 +35,9 @@ export const initialDashboardState: DashboardState = {
     depthLevels: [1, 2, 3],
   },
   filters: {
-    tradeType: "all",
-    traderGroup: null,
-    traderId: null,
+    selectedTraderClasses: DEFAULT_TRADER_CLASSES,
+    selectedTraderGroups: [],
+    selectedTraderIds: [],
     quantityRange: null,
   },
   chartViewport: null,
@@ -108,28 +113,28 @@ export function dashboardReducer(state: DashboardState, action: DashboardAction)
           depthLevels: action.levels,
         },
       };
-    case "setTradeTypeFilter":
+    case "setSelectedTraderClasses":
       return {
         ...state,
         filters: {
           ...state.filters,
-          tradeType: action.tradeType,
+          selectedTraderClasses: action.traderClasses,
         },
       };
-    case "setTraderGroupFilter":
+    case "setSelectedTraderGroups":
       return {
         ...state,
         filters: {
           ...state.filters,
-          traderGroup: action.traderGroup,
+          selectedTraderGroups: action.traderGroups,
         },
       };
-    case "setTraderIdFilter":
+    case "setSelectedTraderIds":
       return {
         ...state,
         filters: {
           ...state.filters,
-          traderId: action.traderId,
+          selectedTraderIds: action.traderIds,
         },
       };
     case "setQuantityRange":

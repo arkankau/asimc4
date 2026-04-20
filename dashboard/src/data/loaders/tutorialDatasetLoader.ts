@@ -277,7 +277,7 @@ function createProductData(
       quantity: trade.quantity,
       side: sideInfo.side,
       aggressor: sideInfo.aggressor,
-      traderId: trade.buyer || trade.seller || trade.currency || undefined,
+      traderId: trade.buyer || trade.seller || undefined,
       traderGroup: trade.currency ? "market-data" : undefined,
       tradeType: sideInfo.aggressor === "unknown" ? "unknown" : "taker",
     };

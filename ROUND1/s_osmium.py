@@ -1,25 +1,16 @@
-from datamodel import OrderDepth, TradingState, Order
-from typing import List
+from datamodel import OrderDepth, Order, TradingState
+from typing import Any, Dict, List, Optional, Tuple
 import json
+import math
 
 
 class Trader:
-
     POSITION_LIMIT = 80
-
-    # Fixed fair value - osmium mean-reverts tightly around 10000
-    FAIR_VALUE = 10000
-
-    # How much to skew our quotes per unit of position (inventory risk mgmt)
-    # Positive position -> lower our fair to incentivize selling
-    POSITION_SKEW = 0.15
-
-    # Threshold: only take NPC quotes that are this far past fair value
-    # (otherwise the spread cost eats the reversion profit)
-    TAKE_THRESHOLD = 2
-
-    # When tight spread detected (extra NPC in book), be more aggressive
-    TIGHT_SPREAD_THRESHOLD = 14  # spreads < 14 signal extra NPC activity
+    OSMIUM_POSITION_SKEW = 0.10
+    OSMIUM_VALUE_TAKE_THRESHOLD = 2
+    OSMIUM_DISTORTED_SPREAD = 13
+    OSMIUM_PASSIVE_SIZE = 20
+    OSMIUM_PREFERRED_SPREADS = (16, 18, 19, 21)
 
     def run(self, state: TradingState):
         result = {}
@@ -30,104 +21,183 @@ class Trader:
 
         return result, 0, json.dumps(trader_data)
 
-    def _load_data(self, raw: str) -> dict:
+    def _load_data(self, raw: str) -> Dict[str, Any]:
         if raw:
             try:
-                return json.loads(raw)
+                parsed = json.loads(raw)
+                if isinstance(parsed, dict):
+                    return {
+                        "last_mid": parsed.get("last_mid"),
+                        "last_wall_fair": parsed.get("last_wall_fair"),
+                    }
             except (json.JSONDecodeError, TypeError):
                 pass
-        return {"last_mid": None}
+        return {"last_mid": None, "last_wall_fair": None}
 
-    def _trade_osmium(self, state: TradingState, data: dict) -> List[Order]:
+    def _trade_osmium(self, state: TradingState, data: Dict[str, Any]) -> List[Order]:
         product = "ASH_COATED_OSMIUM"
         od = state.order_depths[product]
-        orders: List[Order] = []
         position = state.position.get(product, 0)
-        buy_cap = self.POSITION_LIMIT - position
-        sell_cap = self.POSITION_LIMIT + position
+        orders: List[Order] = []
 
-        if not od.sell_orders and not od.buy_orders:
+        best_bid = max(od.buy_orders) if od.buy_orders else None
+        best_ask = min(od.sell_orders) if od.sell_orders else None
+        if best_bid is None and best_ask is None:
             return orders
 
-        best_bid = max(od.buy_orders.keys()) if od.buy_orders else None
-        best_ask = min(od.sell_orders.keys()) if od.sell_orders else None
-        mid = (best_bid + best_ask) / 2 if (best_bid and best_ask) else (best_bid or best_ask)
+        top_mid = self._mid_price(od)
+        top_spread = self._spread(od, default=None)
 
-        # Track last mid for reversal signal
-        last_mid = data.get("last_mid")
-        data["last_mid"] = mid
+        wall_bid, wall_ask, wall_spread = self._infer_osmium_wall(od)
+        if wall_bid is not None and wall_ask is not None:
+            wall_fair = (wall_bid + wall_ask) / 2.0
+        elif data.get("last_wall_fair") is not None:
+            wall_fair = float(data["last_wall_fair"])
+        elif top_mid is not None:
+            wall_fair = float(top_mid)
+        else:
+            wall_fair = 10000.0
 
-        # Compute our adjusted fair value with position skew
-        # When we're long, lower fair to be more eager to sell
-        # When we're short, raise fair to be more eager to buy
-        fair = self.FAIR_VALUE - position * self.POSITION_SKEW
+        data["last_wall_fair"] = wall_fair
+        data["last_mid"] = top_mid
 
-        # Detect tight spread (extra NPC in the book)
-        spread = (best_ask - best_bid) if (best_ask and best_bid) else 999
-        tight_spread = spread < self.TIGHT_SPREAD_THRESHOLD
+        fair = wall_fair - position * self.OSMIUM_POSITION_SKEW
+        distorted = (
+            top_spread is not None
+            and top_spread <= self.OSMIUM_DISTORTED_SPREAD
+            and (wall_spread is None or top_spread < wall_spread)
+        )
 
-        # Compute reversal signal from last tick
-        last_delta = (mid - last_mid) if last_mid is not None else 0
+        buy_cap = self.POSITION_LIMIT - position
+        sell_cap = self.POSITION_LIMIT + position
+        bought = 0
+        sold = 0
 
-        # --- LAYER 1: Take mispriced NPC levels ---
-        # Buy asks that are below our fair value (accounting for threshold)
-        take_fair = fair - self.TAKE_THRESHOLD if not tight_spread else fair
-        for ask_price in sorted(od.sell_orders.keys()):
-            if ask_price >= take_fair or buy_cap <= 0:
-                break
-            qty = min(buy_cap, -od.sell_orders[ask_price])
-            orders.append(Order(product, ask_price, qty))
-            buy_cap -= qty
+        if od.sell_orders:
+            for ask in sorted(od.sell_orders):
+                if ask > fair - self.OSMIUM_VALUE_TAKE_THRESHOLD or buy_cap - bought <= 0:
+                    break
+                qty = min(-od.sell_orders[ask], buy_cap - bought)
+                if qty <= 0:
+                    continue
+                orders.append(Order(product, ask, qty))
+                bought += qty
 
-        # Sell bids that are above our fair value (accounting for threshold)
-        take_fair_sell = fair + self.TAKE_THRESHOLD if not tight_spread else fair
-        for bid_price in sorted(od.buy_orders.keys(), reverse=True):
-            if bid_price <= take_fair_sell or sell_cap <= 0:
-                break
-            qty = min(sell_cap, od.buy_orders[bid_price])
-            orders.append(Order(product, bid_price, -qty))
-            sell_cap -= qty
+        if od.buy_orders:
+            for bid in sorted(od.buy_orders, reverse=True):
+                if bid < fair + self.OSMIUM_VALUE_TAKE_THRESHOLD or sell_cap - sold <= 0:
+                    break
+                qty = min(od.buy_orders[bid], sell_cap - sold)
+                if qty <= 0:
+                    continue
+                orders.append(Order(product, bid, -qty))
+                sold += qty
 
-        # --- LAYER 2: During tight spread, trade into the mean-reversion ---
-        if tight_spread and best_bid and best_ask:
-            if mid < self.FAIR_VALUE - 2 and buy_cap > 0:
-                # Price is below fair, tight spread = extra NPC selling
-                # Buy aggressively at the tight ask
-                for ask_price in sorted(od.sell_orders.keys()):
-                    if buy_cap <= 0 or ask_price > self.FAIR_VALUE:
+        if distorted and top_mid is not None:
+            if top_mid < wall_fair - 1 and od.sell_orders:
+                for ask in sorted(od.sell_orders):
+                    if ask > wall_fair or buy_cap - bought <= 0:
                         break
-                    qty = min(buy_cap, -od.sell_orders[ask_price])
-                    orders.append(Order(product, ask_price, qty))
-                    buy_cap -= qty
-
-            elif mid > self.FAIR_VALUE + 2 and sell_cap > 0:
-                # Price is above fair, tight spread = extra NPC buying
-                # Sell aggressively at the tight bid
-                for bid_price in sorted(od.buy_orders.keys(), reverse=True):
-                    if sell_cap <= 0 or bid_price < self.FAIR_VALUE:
+                    qty = min(-od.sell_orders[ask], buy_cap - bought)
+                    if qty <= 0:
+                        continue
+                    orders.append(Order(product, ask, qty))
+                    bought += qty
+            elif top_mid > wall_fair + 1 and od.buy_orders:
+                for bid in sorted(od.buy_orders, reverse=True):
+                    if bid < wall_fair or sell_cap - sold <= 0:
                         break
-                    qty = min(sell_cap, od.buy_orders[bid_price])
-                    orders.append(Order(product, bid_price, -qty))
-                    sell_cap -= qty
+                    qty = min(od.buy_orders[bid], sell_cap - sold)
+                    if qty <= 0:
+                        continue
+                    orders.append(Order(product, bid, -qty))
+                    sold += qty
 
-        # --- LAYER 3: Post resting quotes inside the spread ---
-        if best_bid and best_ask:
-            our_bid = best_bid + 1
-            our_ask = best_ask - 1
+        if best_bid is None or best_ask is None:
+            return orders
 
-            # Shift toward fair value: don't post on wrong side
-            # Also use reversal signal to lean
-            if last_delta > 0:
-                # Price just went up, expect down -> lean short
-                our_ask = max(our_ask - 1, int(fair) + 1)
-            elif last_delta < 0:
-                # Price just went down, expect up -> lean long
-                our_bid = min(our_bid + 1, int(fair) - 1)
+        remaining_buy = buy_cap - bought
+        remaining_sell = sell_cap - sold
 
-            # Post quotes if they're on the correct side of our fair
-            if our_bid < fair and buy_cap > 0:
-                orders.append(Order(product, our_bid, buy_cap))
-            if our_ask > fair and sell_cap > 0:
-                orders.append(Order(product, our_ask, -sell_cap))
+        bid_ceiling = int(math.floor(fair - 1))
+        ask_floor = int(math.ceil(fair + 1))
+
+        if distorted and top_mid is not None:
+            if top_mid < wall_fair:
+                bid_ceiling = max(bid_ceiling, int(math.floor(wall_fair - 1)))
+                ask_floor = max(ask_floor, int(math.ceil(wall_fair + 1)))
+            elif top_mid > wall_fair:
+                bid_ceiling = min(bid_ceiling, int(math.floor(wall_fair - 1)))
+                ask_floor = min(ask_floor, int(math.ceil(wall_fair + 1)))
+
+        our_bid = min(best_bid + 1, bid_ceiling)
+        our_ask = max(best_ask - 1, ask_floor)
+
+        if remaining_buy > 0 and our_bid < best_ask:
+            orders.append(
+                Order(product, our_bid, min(self.OSMIUM_PASSIVE_SIZE, remaining_buy))
+            )
+        if remaining_sell > 0 and our_ask > best_bid:
+            orders.append(
+                Order(product, our_ask, -min(self.OSMIUM_PASSIVE_SIZE, remaining_sell))
+            )
 
         return orders
+
+    def _infer_osmium_wall(
+        self, od: OrderDepth
+    ) -> Tuple[Optional[int], Optional[int], Optional[int]]:
+        if not od.buy_orders or not od.sell_orders:
+            return None, None, None
+
+        best_bid = max(od.buy_orders)
+        best_ask = min(od.sell_orders)
+        candidates: List[Tuple[int, int, int, int, int, int, int, int]] = []
+
+        for bid_price, bid_vol in od.buy_orders.items():
+            for ask_price, ask_vol_raw in od.sell_orders.items():
+                if ask_price <= bid_price:
+                    continue
+                ask_vol = -ask_vol_raw
+                spread = ask_price - bid_price
+                spread_score = min(
+                    abs(spread - preferred) for preferred in self.OSMIUM_PREFERRED_SPREADS
+                )
+                exact_preferred = 0 if spread in self.OSMIUM_PREFERRED_SPREADS else 1
+                support = min(bid_vol, ask_vol)
+                balance = abs(bid_vol - ask_vol)
+                depth_penalty = abs(best_bid - bid_price) + abs(ask_price - best_ask)
+                candidates.append(
+                    (
+                        exact_preferred,
+                        spread_score,
+                        -support,
+                        balance,
+                        depth_penalty,
+                        bid_price,
+                        ask_price,
+                        spread,
+                    )
+                )
+
+        if not candidates:
+            return best_bid, best_ask, best_ask - best_bid
+
+        chosen = min(candidates)
+        return chosen[5], chosen[6], chosen[7]
+
+    @staticmethod
+    def _mid_price(od: OrderDepth) -> Optional[float]:
+        if od.buy_orders and od.sell_orders:
+            return (max(od.buy_orders) + min(od.sell_orders)) / 2.0
+        if od.buy_orders:
+            return float(max(od.buy_orders))
+        if od.sell_orders:
+            return float(min(od.sell_orders))
+        return None
+
+    @staticmethod
+    def _spread(od: OrderDepth, default: Optional[float]) -> Optional[float]:
+        if od.buy_orders and od.sell_orders:
+            return float(min(od.sell_orders) - max(od.buy_orders))
+        return default
