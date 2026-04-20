@@ -384,125 +384,324 @@ ROUND2_EDA_NOTEBOOK = {
     "cells": [
         md(
             """
-            # Round 2 EDA
+            # ROUND2 EDA — `ASH_COATED_OSMIUM` & `INTARIAN_PEPPER_ROOT`
 
-            Deep-dive notebook for the `ROUND_2/` dataset. The goal is to answer four practical questions:
+            Visual exploration of the order book snapshots (`prices_round_2_day_*.csv`) and executed trades (`trades_round_2_day_*.csv`) in the `ROUND_2/` folder.
 
-            1. What structural regimes still dominate the two products?
-            2. How different is Round 2 from the Round 1 baseline?
-            3. Which order-book signals remain predictive after accounting for spread and drift?
-            4. What is likely useful for strategy design versus what is just descriptive noise?
+            **Sections**
+            1. Load & stitch the 3 days (−1, 0, 1)
+            2. Mid-price time series per product
+            3. Spread & book depth
+            4. Returns distribution & volatility
+            5. Rolling statistics (mean, std)
+            6. Autocorrelation of returns
+            7. Cross-product relationship (level + returns)
+            8. Executed trades — price/volume over time
+            9. Microprice vs mid (order-flow imbalance signal)
+
+            Products are abbreviated as:
+            - **ACO** = `ASH_COATED_OSMIUM`
+            - **IPR** = `INTARIAN_PEPPER_ROOT`
             """
         ),
         code(COMMON_HELPERS),
         md(
             """
-            ## Load Round 1 and Round 2
+            ## 1. Load prices & trades across all days
 
-            Round 1 is kept here only as a baseline. The rest of the notebook is centered on `ROUND_2/`.
+            Each day has its own timestamp starting at 0. We create a global `t` = `day * 1_000_000 + timestamp` so the 3 days lay out end-to-end on a single axis.
             """
         ),
         code(
             """
-            prices_round1, trades_round1 = load_round(ROUND1_DIR, 1)
-            prices_round2, trades_round2 = load_round(ROUND2_DIR, 2)
+            DATA_DIR = ROUND2_DIR
 
-            prices_round1 = prepare_features(prices_round1)
-            prices_round2 = prepare_features(prices_round2)
+            prices_raw, trades = load_round(DATA_DIR, 2)
+            prices = prepare_features(prices_raw)
 
-            print("Round 1 prices:", prices_round1.shape, "| trades:", trades_round1.shape)
-            print("Round 2 prices:", prices_round2.shape, "| trades:", trades_round2.shape)
-            print("Round 2 days:", sorted(prices_round2["day"].unique()))
-            print("Round 2 products:", sorted(prices_round2["product"].unique()))
+            print("prices rows:", len(prices), "| days:", sorted(prices["day"].unique()))
+            print("trades rows:", len(trades), "| products:", trades["symbol"].unique())
+            print("mid==0 rows:", int((prices["mid_price"] == 0).sum()))
+            prices.head()
             """
         ),
-        md("## Round 2 data quality and order-book shape"),
-        code("quality_table(prices_round2)"),
-        code("plot_mid_paths(prices_round2, title='Round 2 mid-price paths')"),
-        code("plot_spread_depth(prices_round2)"),
+        code(
+            """
+            def pivot_mid(df: pd.DataFrame) -> pd.DataFrame:
+                m = (
+                    clean_mid(df)
+                    .pivot_table(index="t", columns="product", values="mid_price", aggfunc="last")
+                    .sort_index()
+                    .ffill()
+                    .dropna()
+                )
+                m.columns = [SHORT[c] for c in m.columns]
+                return m
+
+
+            mids = pivot_mid(prices)
+            mids.describe()
+            """
+        ),
         md(
             """
-            ## Regime fit
+            ## 2. Mid-price over time (per product, per day)
 
-            `ASH_COATED_OSMIUM` is tested as a stationary OU-style process.
-
-            `INTARIAN_PEPPER_ROOT` is modeled directly as a deterministic linear function of `day` and `timestamp`:
-
-            `fair(day, timestamp) = a + b * day + c * timestamp`
+            Vertical dashed lines mark day boundaries.
             """
         ),
-        code("regime_table(prices_round2)"),
         code(
             """
-            beta = plot_ipr_formula(prices_round2)
+            day_breaks = sorted(prices["day"].unique())
+            day_bounds = [d * 1_000_000 for d in day_breaks]
+
+            fig, axes = plt.subplots(2, 1, figsize=(13, 7), sharex=True)
+            for ax, col in zip(axes, ["ACO", "IPR"]):
+                ax.plot(mids.index, mids[col], color=COLORS[col], lw=0.7)
+                ax.set_ylabel(f"{col} mid")
+                ax.set_title(f"{col} mid-price across days {day_breaks}")
+                for b in day_bounds[1:]:
+                    ax.axvline(b, color="k", ls="--", alpha=0.4)
+            axes[-1].set_xlabel("global time (day*1e6 + timestamp)")
+            plt.tight_layout()
+            plt.show()
+            """
+        ),
+        md("## 3. Spread (best ask − best bid) and top-of-book depth"),
+        code(
+            """
+            p = clean_mid(prices)
+
+            fig, axes = plt.subplots(2, 2, figsize=(13, 7))
+            for i, prod in enumerate(PRODUCTS):
+                sub = p[p["product"] == prod]
+                c = COLORS[SHORT[prod]]
+                axes[0, i].hist(sub["spread"].dropna(), bins=30, color=c, alpha=0.8)
+                axes[0, i].set_title(f"{SHORT[prod]} — spread distribution")
+                axes[0, i].set_xlabel("ask1 - bid1")
+                axes[1, i].hist(sub["depth_top"], bins=40, color=c, alpha=0.8)
+                axes[1, i].set_title(f"{SHORT[prod]} — top-of-book total depth")
+                axes[1, i].set_xlabel("bid_vol_1 + ask_vol_1")
+            plt.tight_layout()
+            plt.show()
+
+            p.groupby("product")[["spread", "depth_top", "depth_l2", "depth_l3"]].describe().T
+            """
+        ),
+        md("## 4. Returns distribution & volatility"),
+        code(
+            """
+            mids_pos = mids.where(mids > 0)
+            rets = np.log(mids_pos).diff() * 1e4  # bps
+            rets = rets.replace([np.inf, -np.inf], np.nan).dropna()
+
+            fig, axes = plt.subplots(1, 2, figsize=(13, 4))
+            for ax, col in zip(axes, ["ACO", "IPR"]):
+                x = rets[col].to_numpy()
+                x = x[np.isfinite(x)]
+                if x.size == 0:
+                    ax.set_title(f"{col} — no finite returns")
+                    continue
+                lo, hi = np.quantile(x, [0.001, 0.999])
+                xc = x[(x >= lo) & (x <= hi)] if hi > lo else x
+                ax.hist(xc, bins=80, color=COLORS[col], alpha=0.8)
+                ax.set_title(f"{col} log-returns (bps)  |  σ = {x.std():.2f}  |  n={len(x)}")
+                ax.set_xlabel("bps per 100ms tick (clipped to 0.1–99.9%)")
+            plt.tight_layout()
+            plt.show()
+
+            print("summary (bps):")
+            print(rets.agg(["mean", "std", "min", "max"]).T)
+            """
+        ),
+        md("## 5. Rolling mean & std (window = 100 ticks ≈ 10s)"),
+        code(
+            """
+            WIN = 100
+            fig, axes = plt.subplots(2, 1, figsize=(13, 7), sharex=True)
+            for col in ["ACO", "IPR"]:
+                axes[0].plot(mids.index, mids[col].rolling(WIN).mean(), color=COLORS[col], label=col, lw=0.9)
+                axes[1].plot(rets.index, rets[col].rolling(WIN).std(), color=COLORS[col], label=col, lw=0.9)
+            axes[0].set_title(f"Rolling mean of mid (window {WIN})")
+            axes[0].legend()
+            axes[1].set_title(f"Rolling std of log-returns in bps (window {WIN})")
+            axes[1].set_xlabel("global time")
+            axes[1].legend()
+            for b in day_bounds[1:]:
+                for ax in axes:
+                    ax.axvline(b, color="k", ls="--", alpha=0.4)
+            plt.tight_layout()
+            plt.show()
+            """
+        ),
+        md(
+            """
+            ## 6. Autocorrelation of returns
+
+            Negative short-lag ACF ⇒ mean-reverting micro-structure, which favors fair-value reversion and short-horizon quote skew.
+            """
+        ),
+        code(
+            """
+            def acf(x: np.ndarray, lags: int = 30) -> np.ndarray:
+                x = x - x.mean()
+                v = np.dot(x, x)
+                if v < 1e-20:
+                    return np.full(lags + 1, np.nan)
+                return np.array([np.dot(x[: len(x) - k], x[k:]) / v for k in range(lags + 1)])
+
+
+            LAGS = 30
+            fig, axes = plt.subplots(1, 2, figsize=(13, 4))
+            for ax, col in zip(axes, ["ACO", "IPR"]):
+                a = acf(rets[col].values, LAGS)
+                ax.bar(range(LAGS + 1), a, color=COLORS[col], alpha=0.8)
+                ax.axhline(0, color="k", lw=0.5)
+                ax.set_title(f"{col} — return ACF (lag 0..{LAGS})")
+                ax.set_xlabel("lag (ticks)")
+            plt.tight_layout()
+            plt.show()
+            """
+        ),
+        md("## 7. Cross-product relationship"),
+        code(
+            """
+            fig, axes = plt.subplots(1, 2, figsize=(13, 5))
+
+            axes[0].scatter(mids["ACO"], mids["IPR"], s=3, alpha=0.3, color="#555")
+            axes[0].set_xlabel("ACO mid")
+            axes[0].set_ylabel("IPR mid")
+            axes[0].set_title(f"Level scatter (Pearson r = {mids.corr().iloc[0,1]:+.3f})")
+
+            axes[1].scatter(rets["ACO"], rets["IPR"], s=3, alpha=0.3, color="#555")
+            axes[1].set_xlabel("ACO ret (bps)")
+            axes[1].set_ylabel("IPR ret (bps)")
+            axes[1].set_title(f"Return scatter (Pearson r = {rets.corr().iloc[0,1]:+.3f})")
+            plt.tight_layout()
+            plt.show()
+
+            lags = range(-20, 21)
+            ac = rets["ACO"].values
+            ip = rets["IPR"].values
+            xcorr = []
+            for L in lags:
+                if L >= 0:
+                    a, b = ac[: len(ac) - L], ip[L:]
+                else:
+                    a, b = ac[-L:], ip[: len(ip) + L]
+                if len(a) < 5 or a.std() == 0 or b.std() == 0:
+                    xcorr.append(np.nan)
+                    continue
+                xcorr.append(float(np.corrcoef(a, b)[0, 1]))
+
+            plt.figure(figsize=(12, 3.5))
+            plt.bar(list(lags), xcorr, color="#2ca02c", alpha=0.8)
+            plt.axvline(0, color="k", lw=0.5)
+            plt.title("Lagged Pearson(ACO_ret(t), IPR_ret(t+L))  — positive L means ACO leads")
+            plt.xlabel("lag L (ticks)")
+            plt.tight_layout()
+            plt.show()
+            """
+        ),
+        md("## 8. Executed trades — price & volume over time"),
+        code(
+            """
+            fig, axes = plt.subplots(2, 1, figsize=(13, 7), sharex=True)
+            for i, prod in enumerate(PRODUCTS):
+                ax = axes[i]
+                tr = trades[trades["symbol"] == prod]
+                mid_sub = clean_mid(prices, prod)[["t", "mid_price"]]
+                ax.plot(mid_sub["t"], mid_sub["mid_price"], color="#999", lw=0.6, label="mid")
+                sc = ax.scatter(
+                    tr["t"],
+                    tr["price"],
+                    s=np.clip(tr["quantity"] * 2, 4, 80),
+                    c=tr["quantity"],
+                    cmap="viridis",
+                    alpha=0.7,
+                    label="trades",
+                )
+                plt.colorbar(sc, ax=ax, label="qty")
+                ax.set_title(f"{SHORT[prod]} — trades vs mid ({len(tr)} trades)")
+                ax.set_ylabel("price")
+                ax.legend(loc="upper right")
+                for b in day_bounds[1:]:
+                    ax.axvline(b, color="k", ls="--", alpha=0.4)
+            axes[-1].set_xlabel("global time")
+            plt.tight_layout()
+            plt.show()
+
+            print("trade qty & price summary per product:")
+            print(trades.groupby("symbol")[["price", "quantity"]].describe().T)
+            """
+        ),
+        md(
+            """
+            ## 9. Microprice vs mid — order-flow imbalance signal
+
+            Microprice = `ask * (bid_vol / total) + bid * (ask_vol / total)` — pulls fair toward the heavier side of the book. The deviation `micro − mid` is a short-horizon directional signal.
+            """
+        ),
+        code(
+            """
+            q = clean_mid(prices).copy()
+            q["micro_dev"] = q["microprice"] - q["mid_price"]
+
+            fig, axes = plt.subplots(1, 2, figsize=(13, 4))
+            for ax, prod in zip(axes, PRODUCTS):
+                sub = q[q["product"] == prod]["micro_dev"].dropna()
+                ax.hist(sub, bins=60, color=COLORS[SHORT[prod]], alpha=0.8)
+                ax.axvline(0, color="k", lw=0.6)
+                ax.set_title(f"{SHORT[prod]} — microprice − mid  (mean={sub.mean():+.3f})")
+                ax.set_xlabel("price units")
+            plt.tight_layout()
+            plt.show()
+            """
+        ),
+        md(
+            """
+            ---
+            ### Round 2-specific takeaways to verify
+            - `ACO` still behaves like a short-half-life mean-reversion product; check whether signal strength is large enough to beat the spread only when used passively.
+            - `IPR` still looks like a deterministic trend product; fit an explicit fair-value line and inspect the residual rather than treating the raw level as stationary.
+            - Compare microprice / imbalance signal strength against residual-based signals; the strongest one should drive quote skew and selective aggression.
+            - Trade clusters relative to mid still matter: they help separate passive edge from signals that only look good on raw future-mid markouts.
+            """
+        ),
+        code(
+            """
+            aco_stats = aco_regime_metrics(prices).round(4)
+            ipr_stats = ipr_regime_metrics(prices).round(4)
+            ipr_fit, beta = ipr_trend_fit(prices)
+            aligned = align_trades_to_book(prices, trades)
+
+            print("ACO regime stats")
+            print(aco_stats)
+
+            print("\\nIPR fair-value fit")
             print(
-                f"Fitted IPR fair formula: {beta[0]:.3f} + {beta[1]:.6f} * day + {beta[2]:.9f} * timestamp"
+                f"fair(day, timestamp) ~= {beta[0]:.3f} + {beta[1]:.6f} * day + {beta[2]:.9f} * timestamp"
             )
-            """
-        ),
-        md("## Round 1 vs Round 2 parameter comparison"),
-        code("compare_rounds(prices_round1, prices_round2)"),
-        md(
-            """
-            ## Signal quality by horizon
+            print(ipr_stats)
 
-            The tables below use raw future mid-price change as the target markout. This is not net PnL.
+            print("\\n10-tick signal correlations")
+            signal_summary = pd.concat(
+                [
+                    horizon_signal_table(prices, "ASH_COATED_OSMIUM", horizons=(10,)).add_prefix("ACO_"),
+                    horizon_signal_table(prices, "INTARIAN_PEPPER_ROOT", horizons=(10,)).add_prefix("IPR_"),
+                ],
+                axis=1,
+            )
+            print(signal_summary)
 
-            That distinction matters:
+            print("\\nACO threshold markouts (10 ticks)")
+            print(threshold_markouts(prices, "ASH_COATED_OSMIUM", horizon=10))
 
-            - strong raw markout can still be untradable after paying the spread;
-            - signals below half-spread are better used for quote skew, fair-value adjustment, or inventory leaning;
-            - signals above half-spread become plausible candidates for selective aggression.
-            """
-        ),
-        code(
-            """
-            print("ACO signal correlations to future mid moves")
-            display_aco = horizon_signal_table(prices_round2, "ASH_COATED_OSMIUM")
-            print(display_aco)
+            print("\\nIPR residual threshold markouts (10 ticks)")
+            print(threshold_markouts(prices, "INTARIAN_PEPPER_ROOT", horizon=10))
 
-            print("\\nIPR signal correlations to future mid moves")
-            display_ipr = horizon_signal_table(prices_round2, "INTARIAN_PEPPER_ROOT")
-            print(display_ipr)
-            """
-        ),
-        code(
-            """
-            print("ACO imbalance bucketed markouts -> 10-tick markout")
-            print(markout_table(prices_round2, "ASH_COATED_OSMIUM", "imbalance", horizon=10))
-
-            print("\\nACO rolling z-score quintiles -> 10-tick markout")
-            print(markout_table(prices_round2, "ASH_COATED_OSMIUM", "price_z", horizon=10))
-
-            print("\\nIPR trend-residual z-score quintiles -> 10-tick markout")
-            print(markout_table(prices_round2, "INTARIAN_PEPPER_ROOT", "trend_z", horizon=10))
-            """
-        ),
-        code(
-            """
-            print("ACO threshold markouts")
-            print(threshold_markouts(prices_round2, "ASH_COATED_OSMIUM", horizon=10))
-
-            print("\\nIPR threshold markouts")
-            print(threshold_markouts(prices_round2, "INTARIAN_PEPPER_ROOT", horizon=10))
-            """
-        ),
-        md("## Trade tape alignment"),
-        code(
-            """
-            aligned_round2 = align_trades_to_book(prices_round2, trades_round2)
-            trade_summary(aligned_round2)
-            """
-        ),
-        md(
-            """
-            ## Interpretation
-
-            The recurring pattern is:
-
-            - `ASH_COATED_OSMIUM`: stationary around ~10,001 with a short half-life and strong L1 imbalance signal. This still looks like a quote-skew / inventory-management product more than a pure taker product.
-            - `INTARIAN_PEPPER_ROOT`: the deterministic day-plus-time trend remains the main edge, and the residual around that trend is still bounded enough to fade selectively.
-            - Round 2 did not break the Round 1 structure. The main changes are quantitative, not qualitative: slightly higher pepper residual noise, wider pepper spreads, and more osmium trading activity.
+            print("\\nAligned trade summary")
+            print(trade_summary(aligned))
             """
         ),
     ],
