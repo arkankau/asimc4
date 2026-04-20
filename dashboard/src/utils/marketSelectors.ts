@@ -367,6 +367,38 @@ function filterEventsToViewport(events: MarketEvent[], viewport: ChartViewport) 
   );
 }
 
+function filterEventsToTimeWindow(events: MarketEvent[], viewport: ChartViewport) {
+  return events.filter(
+    (event) => event.timestamp >= viewport.minTimestamp && event.timestamp <= viewport.maxTimestamp,
+  );
+}
+
+function filterIndicatorSeriesToViewport(series: IndicatorSeries[], viewport: ChartViewport) {
+  return series.map((indicator) => ({
+    ...indicator,
+    points: indicator.points.filter(
+      (point) =>
+        point.value !== 0 &&
+        point.timestamp >= viewport.minTimestamp &&
+        point.timestamp <= viewport.maxTimestamp &&
+        point.value >= viewport.minPrice &&
+        point.value <= viewport.maxPrice,
+    ),
+  }));
+}
+
+function filterIndicatorSeriesToTimeWindow(series: IndicatorSeries[], viewport: ChartViewport) {
+  return series.map((indicator) => ({
+    ...indicator,
+    points: indicator.points.filter(
+      (point) =>
+        point.value !== 0 &&
+        point.timestamp >= viewport.minTimestamp &&
+        point.timestamp <= viewport.maxTimestamp,
+    ),
+  }));
+}
+
 function clampViewportToBounds(viewport: ChartViewport, bounds: ChartViewport): ChartViewport {
   const boundsTimeSpan = Math.max(bounds.maxTimestamp - bounds.minTimestamp, 1);
   const boundsPriceSpan = Math.max(bounds.maxPrice - bounds.minPrice, 1);
@@ -551,23 +583,23 @@ export function buildChartSeriesBundle(product: ProductMarketData | null, state:
 
   const fullBounds = collectChartBounds(allEvents, visibleIndicators);
   const viewport = state.chartViewport ? clampViewportToBounds(state.chartViewport, fullBounds) : fullBounds;
-  const visibleEvents = filterEventsToViewport(allEvents, viewport).sort((left, right) => left.timestamp - right.timestamp);
+  const viewportEvents = filterEventsToViewport(allEvents, viewport);
+  const timeWindowEvents = filterEventsToTimeWindow(allEvents, viewport);
+  const shouldFallbackToTimeWindow = viewportEvents.length === 0 && timeWindowEvents.length > 0;
+  const visibleEvents = (shouldFallbackToTimeWindow ? timeWindowEvents : viewportEvents).sort(
+    (left, right) => left.timestamp - right.timestamp,
+  );
+  const filteredIndicators = shouldFallbackToTimeWindow
+    ? filterIndicatorSeriesToTimeWindow(visibleIndicators, viewport)
+    : filterIndicatorSeriesToViewport(visibleIndicators, viewport);
+
   return {
     visibleBids: visibleEvents.filter((event) => event.kind === "bid"),
     visibleAsks: visibleEvents.filter((event) => event.kind === "ask"),
     visibleTrades: visibleEvents.filter((event) => event.kind === "trade"),
     visibleOwnTrades: visibleEvents.filter((event) => event.kind === "ownTrade"),
     visibleEvents,
-    visibleIndicators: visibleIndicators.map((series) => ({
-      ...series,
-      points: series.points.filter(
-        (point) =>
-          point.timestamp >= viewport.minTimestamp &&
-          point.timestamp <= viewport.maxTimestamp &&
-          point.value >= viewport.minPrice &&
-          point.value <= viewport.maxPrice,
-      ),
-    })),
+    visibleIndicators: filteredIndicators,
     fullBounds,
     viewport,
     filterSummary: buildFilterSummary(state, filterSupport),

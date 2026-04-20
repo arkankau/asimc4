@@ -323,6 +323,12 @@ export function ProductMicrostructureChart() {
 
     return collectDisplayBounds(values, timestamps);
   }, [displayedMarketTrades, displayedMidPricePoints, displayedOverlayIndicators, displayedOwnTrades, quotePaths]);
+  const hasRenderableData =
+    quotePaths.some(({ points }) => points.length > 0) ||
+    displayedMidPricePoints.length > 0 ||
+    displayedOverlayIndicators.some((series) => series.displayPoints.length > 0) ||
+    displayedMarketTrades.length > 0 ||
+    displayedOwnTrades.length > 0;
 
   const yScale = (value: number) => {
     const span = Math.max(displayBounds.maxPrice - displayBounds.minPrice, 1);
@@ -474,7 +480,7 @@ export function ProductMicrostructureChart() {
         </div>
       }
     >
-      {selectedProduct === null || chartSeries.visibleEvents.length === 0 ? (
+      {selectedProduct === null || !hasRenderableData ? (
         <div className="chart-tooltip chart-tooltip--empty">
           No market microstructure data is available for the selected product under the current filters.
         </div>
