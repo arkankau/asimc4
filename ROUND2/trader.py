@@ -23,6 +23,9 @@ class Trader:
     ACO_WARMUP = 50
     ACO_POSITION_SKEW = 0.05
 
+    def bid(self) -> int:
+        return 2000
+
     def run(self, state: TradingState):
         try:
             memory = json.loads(state.traderData) if state.traderData else {}
