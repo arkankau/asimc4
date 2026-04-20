@@ -24,6 +24,41 @@
 
 ---
 
+---
+
+## Round 2 — Market Access Fee (MAF) Bidding
+
+### 5. Opportunity Valuation
+> "Does the access still make sense once the fee is in the picture? Does it change how you price things? Does it shift where you want to position yourself?"
+
+**Interpretation**: Before bidding, calculate your exact expected value from the extra volume. 25% more order book depth → ~25% more ACO fills → estimate in XIRECs. If your bid exceeds that value, it's a net loss. The access isn't inherently valuable — only if it pays back more than it costs.
+
+---
+
+### 6. Competing With Others (Game Theory)
+> "To get full market access you need to outbid the median. Not the top. The median."
+> "Every bid out there is basically someone's guess about what everyone else is going to do."
+
+**Interpretation**: This is a Keynesian beauty contest. You need to be above the 50th percentile bid — not the highest. The optimal bid is just above your estimate of the median. Overbidding costs XIRECs. Underbidding costs market access entirely. Read whether the field is conservative or aggressive.
+
+---
+
+### 7. Risk Appetite
+> "The more interesting move is figuring out how low you can go while still landing above the median."
+> "Every XIREC you don't spend on access is a XIREC that actually does something useful."
+
+**Interpretation**: Bid efficiency matters. Don't add a huge safety buffer — that's overpaying. But don't bid at the exact estimated median either (too risky). Find your confidence interval and bid just enough above median to be comfortable. The cost of missing the threshold is losing all extra volume.
+
+---
+
+### 8. Cooperation and Trust
+> "The calm isn't coming from the market. It's coming from the alignment."
+> "Don't rely on others continuing to act the way you expect. That's not a position. That's just hope with extra steps."
+
+**Interpretation**: If all teams value access similarly, median bids converge and stabilize. But this is fragile — one team changing strategy shifts the median. Don't anchor your bid on assumed stable behavior from others. Budget a margin for unpredictable bids.
+
+---
+
 ## 4. Tipping the Scale
 > "Volume is the last thing that still has weight. You don't need a lot."
 > "Just looking for the point where volume almost tips. Where the market is already leaning and one small addition changes where everything settles."
