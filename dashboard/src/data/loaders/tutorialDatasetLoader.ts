@@ -23,6 +23,7 @@ interface TutorialDatasetFileConfig {
   round: number;
   pricesPath: string;
   tradesPath: string;
+  productFilter?: string;
 }
 
 interface TutorialPriceRow {
@@ -73,6 +74,93 @@ const tutorialDatasetConfigs: TutorialDatasetFileConfig[] = [
     round: 0,
     pricesPath: "/tutorial/data/prices_round_0_day_-1.csv",
     tradesPath: "/tutorial/data/trades_round_0_day_-1.csv",
+  },
+  {
+    id: "round-1-day--2",
+    name: "Round 1 Day -2 (All Products)",
+    description: "Round 1 order book and trades for day -2.",
+    day: -2,
+    round: 1,
+    pricesPath: "/round1/data/prices_round_1_day_-2.csv",
+    tradesPath: "/round1/data/trades_round_1_day_-2.csv",
+  },
+  {
+    id: "round-1-day--1",
+    name: "Round 1 Day -1 (All Products)",
+    description: "Round 1 order book and trades for day -1.",
+    day: -1,
+    round: 1,
+    pricesPath: "/round1/data/prices_round_1_day_-1.csv",
+    tradesPath: "/round1/data/trades_round_1_day_-1.csv",
+  },
+  {
+    id: "round-1-day-0",
+    name: "Round 1 Day 0 (All Products)",
+    description: "Round 1 order book and trades for day 0.",
+    day: 0,
+    round: 1,
+    pricesPath: "/round1/data/prices_round_1_day_0.csv",
+    tradesPath: "/round1/data/trades_round_1_day_0.csv",
+  },
+  {
+    id: "round-1-osmium-day--2",
+    name: "Round 1 Osmium Day -2",
+    description: "ASH_COATED_OSMIUM order book and trades for day -2.",
+    day: -2,
+    round: 1,
+    pricesPath: "/round1/data/prices_round_1_day_-2.csv",
+    tradesPath: "/round1/data/trades_round_1_day_-2.csv",
+    productFilter: "ASH_COATED_OSMIUM",
+  },
+  {
+    id: "round-1-osmium-day--1",
+    name: "Round 1 Osmium Day -1",
+    description: "ASH_COATED_OSMIUM order book and trades for day -1.",
+    day: -1,
+    round: 1,
+    pricesPath: "/round1/data/prices_round_1_day_-1.csv",
+    tradesPath: "/round1/data/trades_round_1_day_-1.csv",
+    productFilter: "ASH_COATED_OSMIUM",
+  },
+  {
+    id: "round-1-osmium-day-0",
+    name: "Round 1 Osmium Day 0",
+    description: "ASH_COATED_OSMIUM order book and trades for day 0.",
+    day: 0,
+    round: 1,
+    pricesPath: "/round1/data/prices_round_1_day_0.csv",
+    tradesPath: "/round1/data/trades_round_1_day_0.csv",
+    productFilter: "ASH_COATED_OSMIUM",
+  },
+  {
+    id: "round-1-pepper-day--2",
+    name: "Round 1 Pepper Root Day -2",
+    description: "INTARIAN_PEPPER_ROOT order book and trades for day -2.",
+    day: -2,
+    round: 1,
+    pricesPath: "/round1/data/prices_round_1_day_-2.csv",
+    tradesPath: "/round1/data/trades_round_1_day_-2.csv",
+    productFilter: "INTARIAN_PEPPER_ROOT",
+  },
+  {
+    id: "round-1-pepper-day--1",
+    name: "Round 1 Pepper Root Day -1",
+    description: "INTARIAN_PEPPER_ROOT order book and trades for day -1.",
+    day: -1,
+    round: 1,
+    pricesPath: "/round1/data/prices_round_1_day_-1.csv",
+    tradesPath: "/round1/data/trades_round_1_day_-1.csv",
+    productFilter: "INTARIAN_PEPPER_ROOT",
+  },
+  {
+    id: "round-1-pepper-day-0",
+    name: "Round 1 Pepper Root Day 0",
+    description: "INTARIAN_PEPPER_ROOT order book and trades for day 0.",
+    day: 0,
+    round: 1,
+    pricesPath: "/round1/data/prices_round_1_day_0.csv",
+    tradesPath: "/round1/data/trades_round_1_day_0.csv",
+    productFilter: "INTARIAN_PEPPER_ROOT",
   },
 ];
 
@@ -326,8 +414,15 @@ export async function loadTutorialDatasets(): Promise<MarketDataset[]> {
         pricesResponse.text(),
         tradesResponse.text(),
       ]);
-      const priceRows = parsePriceRows(pricesText);
-      const tradeRows = parseTradeRows(tradesText);
+      const allPriceRows = parsePriceRows(pricesText);
+      const allTradeRows = parseTradeRows(tradesText);
+
+      const priceRows = config.productFilter
+        ? allPriceRows.filter((row) => row.product === config.productFilter)
+        : allPriceRows;
+      const tradeRows = config.productFilter
+        ? allTradeRows.filter((row) => row.symbol === config.productFilter)
+        : allTradeRows;
 
       const productIds = [...new Set(priceRows.map((row) => row.product))];
       const products = productIds.map((productId) =>
