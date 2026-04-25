@@ -598,8 +598,8 @@ export function ProductMicrostructureChart() {
                     .join(" ")}
                   fill="none"
                   stroke={kind === "bid" ? "#4ea66e" : "#d06464"}
-                  strokeWidth={Math.max(1, 2.6 - (level - 1) * 0.55)}
-                  opacity={Math.max(0.35, 0.95 - (level - 1) * 0.2)}
+                  strokeWidth={Math.max(0.55, 1.15 - (level - 1) * 0.18)}
+                  opacity={Math.max(0.22, 0.48 - (level - 1) * 0.08)}
                 />
               ) : null,
             )}
