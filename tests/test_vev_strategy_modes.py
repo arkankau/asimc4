@@ -30,6 +30,23 @@ class VevStrategyModeTests(unittest.TestCase):
         self.assertIn(("VEV_5200", "VEV_5300"), pairs)
         self.assertTrue(all("VEV_6000" not in pair and "VEV_6500" not in pair for pair in pairs))
 
+    def test_zscore_mode_uses_recent_mid_history_only(self) -> None:
+        core = load_core()
+        trader = core.BaseVevTrader()
+        trader.STRATEGY_MODE = "zscore"
+
+        history = [100.0] * 24 + [106.0]
+        target = trader._zscore_target_from_history(
+            voucher="VEV_5300",
+            price_history=history,
+            current_mid=106.0,
+            spread=2.0,
+            tte_years=5.0 / 252.0,
+            late_session=False,
+        )
+
+        self.assertLess(target, 0)
+
 
 if __name__ == "__main__":
     unittest.main()
