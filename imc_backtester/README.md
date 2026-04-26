@@ -19,6 +19,22 @@ Run from the repo root:
 python3 -m imc_backtester /path/to/trading.py /path/to/submission.log
 ```
 
+Replay Round 3 raw CSVs with option-aware marking:
+
+```bash
+python3 -m imc_backtester round3csv /path/to/trading.py /path/to/3/ROUND_3 \
+  --mark-mode smile \
+  --timestamp-mode local
+```
+
+Restrict to one historical day:
+
+```bash
+python3 -m imc_backtester round3csv /path/to/trading.py /path/to/3/ROUND_3 \
+  --day 0 \
+  --bootstrap-repetitions 0
+```
+
 Write to a custom output file:
 
 ```bash
@@ -40,6 +56,23 @@ The replay output now includes a `metrics` block with:
 - max drawdown and profit-to-drawdown
 - product concentration
 - Monte Carlo block bootstrap summaries
+
+## Round 3 CSV Backtester
+
+The `round3csv` mode is for the raw `prices_round_3_day_*.csv` and
+`trades_round_3_day_*.csv` files instead of downloaded IMC `.log` JSON.
+
+It supports:
+
+- direct replay from the raw Round 3 folder
+- option-aware marking for vouchers via `--mark-mode smile`
+- alternative voucher marks via `--mark-mode mid|conservative|intrinsic`
+- `--timestamp-mode local|global` to control what the strategy sees in `state.timestamp`
+- `ROUND3_DAY`, `ROUND3_LOCAL_TIMESTAMP`, `ROUND3_GLOBAL_TIMESTAMP`, and `ROUND3_TTE_MILLIDAYS` in `state.observations.plainValueObservations`
+
+Important caveat:
+
+- this is still an approximation; it does not know the exchange's hidden end-of-round liquidation fair value
 
 ## Metrics Mode
 
