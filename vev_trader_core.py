@@ -1,0 +1,983 @@
+from datamodel import Order, OrderDepth, TradingState
+from typing import Any, Dict, List, Optional, Tuple
+import json
+import math
+
+
+class BaseVevTrader:
+    HYDROGEL = "HYDROGEL_PACK"
+    UNDERLYING = "VELVETFRUIT_EXTRACT"
+    ALL_VOUCHERS = (
+        "VEV_4000",
+        "VEV_4500",
+        "VEV_5000",
+        "VEV_5100",
+        "VEV_5200",
+        "VEV_5300",
+        "VEV_5400",
+        "VEV_5500",
+        "VEV_6000",
+        "VEV_6500",
+    )
+    SMILE_VOUCHERS = (
+        "VEV_5000",
+        "VEV_5100",
+        "VEV_5200",
+        "VEV_5300",
+        "VEV_5400",
+        "VEV_5500",
+    )
+    CORE_TRADE_VOUCHERS = (
+        "VEV_5200",
+        "VEV_5300",
+        "VEV_5400",
+    )
+    EXPANSION_TRADE_VOUCHERS = (
+        "VEV_5100",
+        "VEV_5500",
+    )
+    SIGNAL_VOUCHERS = CORE_TRADE_VOUCHERS + EXPANSION_TRADE_VOUCHERS
+    VOUCHER_STRIKES = {
+        "VEV_4000": 4000,
+        "VEV_4500": 4500,
+        "VEV_5000": 5000,
+        "VEV_5100": 5100,
+        "VEV_5200": 5200,
+        "VEV_5300": 5300,
+        "VEV_5400": 5400,
+        "VEV_5500": 5500,
+        "VEV_6000": 6000,
+        "VEV_6500": 6500,
+    }
+    POSITION_LIMITS = {
+        HYDROGEL: 200,
+        UNDERLYING: 200,
+        "VEV_4000": 300,
+        "VEV_4500": 300,
+        "VEV_5000": 300,
+        "VEV_5100": 300,
+        "VEV_5200": 300,
+        "VEV_5300": 300,
+        "VEV_5400": 300,
+        "VEV_5500": 300,
+        "VEV_6000": 300,
+        "VEV_6500": 300,
+    }
+    VOUCHER_SIZE_MULTIPLIER = {
+        "VEV_5100": 0.75,
+        "VEV_5200": 1.0,
+        "VEV_5300": 1.15,
+        "VEV_5400": 1.0,
+        "VEV_5500": 0.75,
+    }
+
+    VARIANT_NAME = "baseline"
+    STRATEGY_MODE = "smile"
+    USE_NORMALIZED_RESIDUAL_SCORE = False
+    USE_COMPRESSION_TRIGGER = False
+    USE_DYNAMIC_STRIKE_ACTIVATION = False
+    ENABLE_IV_PAIR_TRADES = False
+    ENABLE_VERTICAL_ARB = False
+
+    ZSCORE_ONLY_VOUCHERS = CORE_TRADE_VOUCHERS + EXPANSION_TRADE_VOUCHERS
+    BS_TRADE_VOUCHERS = CORE_TRADE_VOUCHERS + EXPANSION_TRADE_VOUCHERS
+
+    LIVE_EXPIRY_DAYS_AT_START = 5.0
+    DAYS_PER_YEAR = 252.0
+    IMPLIED_VOL_INIT = 0.24
+    IMPLIED_VOL_MAX = 3.0
+    VEGA_FLOOR = 0.25
+
+    RESIDUAL_WINDOW = 72
+    RESIDUAL_DELTA_MIN_OBS = 10
+    RESIDUAL_DELTA_ENTRY_Z = 1.1
+    RESIDUAL_SCORE_MIN_OBS = 12
+    RESIDUAL_SCORE_ENTRY = 1.35
+    RESIDUAL_MAD_TO_SIGMA = 1.4826
+    RESIDUAL_MAD_FLOOR = 0.8
+    RESIDUAL_SCALE_SPREAD_MULT = 0.4
+    MIN_RESIDUAL_ABS = 0.8
+    ENTRY_EDGE_MIN = 0.8
+    EXIT_EDGE_MIN = 0.25
+    VOUCHER_MAX_TARGET = 72
+    VOUCHER_TRADE_UNIT = 12
+    VOUCHER_PASSIVE_UNIT = 6
+
+    COMPRESSION_SHORT_WINDOW = 10
+    COMPRESSION_LONG_WINDOW = 36
+    COMPRESSION_RATIO_TRIGGER = 0.72
+    COMPRESSION_THRESHOLD_SCALE_MIN = 0.65
+    COMPRESSION_SNAP_SPREAD_MULT = 0.2
+
+    DYNAMIC_ACTIVATION_VEGA_MIN = 6.0
+    DYNAMIC_REVERSION_WINDOW = 18
+    DYNAMIC_REVERSION_MIN_OBS = 10
+    DYNAMIC_REVERSION_HIT_RATE_MIN = 0.56
+
+    IV_DIFF_MIN_OBS = 12
+    IV_DIFF_ENTRY_Z = 1.6
+    IV_PAIR_TARGET = 24
+
+    ARB_EDGE = 1.0
+    ARB_MAX_QTY = 12
+    LATE_SESSION_START = 900_000
+    FINAL_FLATTEN_START = 980_000
+
+    def run(self, state: TradingState):
+        data = self._load_data(state.traderData)
+        orders: Dict[str, List[Order]] = {}
+
+        spot_depth = state.order_depths.get(self.UNDERLYING)
+        spot_mid = self._mid_price(spot_depth) if spot_depth else None
+        if spot_mid is None:
+            return orders, 0, json.dumps(data)
+
+        smile = self._build_smile_snapshot(state, data, spot_mid)
+        if smile:
+            active_vouchers = self._active_trade_vouchers(smile)
+            self._trade_vouchers(state, data, smile, active_vouchers, orders)
+            if self.ENABLE_VERTICAL_ARB:
+                self._trade_vertical_spreads(state, orders)
+
+        for voucher, snap in smile.items():
+            if voucher in self.SIGNAL_VOUCHERS:
+                residual_history = data["residual_history"].setdefault(voucher, [])
+                residual_history.append(snap["residual"])
+                data["residual_history"][voucher] = residual_history[-self.RESIDUAL_WINDOW :]
+
+                delta_history = data["residual_delta_history"].setdefault(voucher, [])
+                if snap["prev_residual"] is not None:
+                    delta_history.append(snap["residual_delta"])
+                data["residual_delta_history"][voucher] = delta_history[-self.RESIDUAL_WINDOW :]
+
+                data["prev_residual"][voucher] = snap["residual"]
+
+            data["last_iv"][voucher] = snap["iv"]
+
+        for pair_name, iv_diff in self._current_iv_pair_diffs(smile).items():
+            history = data["iv_diff_history"].setdefault(pair_name, [])
+            history.append(iv_diff)
+            data["iv_diff_history"][pair_name] = history[-self.RESIDUAL_WINDOW :]
+
+        return orders, 0, json.dumps(data)
+
+    def _load_data(self, raw: str) -> Dict[str, Any]:
+        parsed: Dict[str, Any] = {}
+        if raw:
+            try:
+                candidate = json.loads(raw)
+                if isinstance(candidate, dict):
+                    parsed = candidate
+            except (TypeError, json.JSONDecodeError):
+                parsed = {}
+
+        raw_residuals = parsed.get("residual_history", {})
+        residual_history: Dict[str, List[float]] = {}
+        if isinstance(raw_residuals, dict):
+            for voucher in self.SIGNAL_VOUCHERS:
+                values = raw_residuals.get(voucher, [])
+                if isinstance(values, list):
+                    residual_history[voucher] = [float(v) for v in values if self._is_finite_number(v)]
+                else:
+                    residual_history[voucher] = []
+        else:
+            residual_history = {voucher: [] for voucher in self.SIGNAL_VOUCHERS}
+
+        raw_delta_residuals = parsed.get("residual_delta_history", {})
+        residual_delta_history: Dict[str, List[float]] = {}
+        if isinstance(raw_delta_residuals, dict):
+            for voucher in self.SIGNAL_VOUCHERS:
+                values = raw_delta_residuals.get(voucher, [])
+                if isinstance(values, list):
+                    residual_delta_history[voucher] = [
+                        float(v) for v in values if self._is_finite_number(v)
+                    ]
+                else:
+                    residual_delta_history[voucher] = []
+        else:
+            residual_delta_history = {voucher: [] for voucher in self.SIGNAL_VOUCHERS}
+
+        raw_prev_residual = parsed.get("prev_residual", {})
+        prev_residual: Dict[str, Optional[float]] = {}
+        if isinstance(raw_prev_residual, dict):
+            for voucher in self.SIGNAL_VOUCHERS:
+                value = raw_prev_residual.get(voucher)
+                prev_residual[voucher] = float(value) if self._is_finite_number(value) else None
+        else:
+            prev_residual = {voucher: None for voucher in self.SIGNAL_VOUCHERS}
+
+        raw_last_iv = parsed.get("last_iv", {})
+        last_iv: Dict[str, float] = {}
+        if isinstance(raw_last_iv, dict):
+            for voucher in self.SMILE_VOUCHERS:
+                value = raw_last_iv.get(voucher)
+                last_iv[voucher] = float(value) if self._is_finite_number(value) else self.IMPLIED_VOL_INIT
+        else:
+            last_iv = {voucher: self.IMPLIED_VOL_INIT for voucher in self.SMILE_VOUCHERS}
+
+        raw_iv_diffs = parsed.get("iv_diff_history", {})
+        iv_diff_history: Dict[str, List[float]] = {}
+        if isinstance(raw_iv_diffs, dict):
+            for pair_name in self._pair_names():
+                values = raw_iv_diffs.get(pair_name, [])
+                if isinstance(values, list):
+                    iv_diff_history[pair_name] = [float(v) for v in values if self._is_finite_number(v)]
+                else:
+                    iv_diff_history[pair_name] = []
+        else:
+            iv_diff_history = {pair_name: [] for pair_name in self._pair_names()}
+
+        return {
+            "residual_history": residual_history,
+            "residual_delta_history": residual_delta_history,
+            "prev_residual": prev_residual,
+            "last_iv": last_iv,
+            "iv_diff_history": iv_diff_history,
+        }
+
+    def _build_smile_snapshot(
+        self, state: TradingState, data: Dict[str, Any], spot_mid: float
+    ) -> Dict[str, Dict[str, float]]:
+        tte = self._tte_years(state)
+        if tte <= 0.0:
+            return {}
+
+        rows: List[Dict[str, float]] = []
+        for voucher in self.SMILE_VOUCHERS:
+            depth = state.order_depths.get(voucher)
+            if depth is None:
+                continue
+
+            top = self._top_of_book(depth)
+            if top is None:
+                continue
+
+            best_bid, bid_vol, best_ask, ask_vol, mid, spread = top
+            strike = self.VOUCHER_STRIKES[voucher]
+            init = data["last_iv"].get(voucher, self.IMPLIED_VOL_INIT)
+            iv = self._implied_vol(mid, spot_mid, float(strike), tte, init)
+            if iv is None:
+                continue
+
+            vega = self._bs_vega(spot_mid, float(strike), tte, iv)
+            if vega < self.VEGA_FLOOR:
+                continue
+
+            rows.append(
+                {
+                    "voucher": voucher,
+                    "strike": float(strike),
+                    "best_bid": float(best_bid),
+                    "bid_vol": float(bid_vol),
+                    "best_ask": float(best_ask),
+                    "ask_vol": float(ask_vol),
+                    "mid": mid,
+                    "spread": spread,
+                    "moneyness": math.log(spot_mid / float(strike)),
+                    "iv": iv,
+                    "vega": vega,
+                }
+            )
+
+        if len(rows) < 4:
+            return {}
+
+        coeffs = self._fit_weighted_quadratic(
+            [(row["moneyness"], row["iv"], row["vega"]) for row in rows]
+        )
+        if coeffs is None:
+            return {}
+
+        a0, a1, a2 = coeffs
+        snapshot: Dict[str, Dict[str, float]] = {}
+        for row in rows:
+            voucher = str(row["voucher"])
+            x = row["moneyness"]
+            fitted_iv = max(0.05, min(self.IMPLIED_VOL_MAX, a0 + a1 * x + a2 * x * x))
+            strike = row["strike"]
+            fair = self._bs_call_price(spot_mid, strike, tte, fitted_iv)
+            delta = self._bs_delta(spot_mid, strike, tte, fitted_iv)
+            residual = row["mid"] - fair
+
+            prev_residual = data["prev_residual"].get(voucher) if voucher in self.SIGNAL_VOUCHERS else None
+            residual_delta = 0.0 if prev_residual is None else residual - prev_residual
+
+            delta_hist = data["residual_delta_history"].get(voucher, [])
+            delta_mean = self._mean(delta_hist) if delta_hist else 0.0
+            delta_std = self._std(delta_hist) if len(delta_hist) >= 2 else 0.0
+            delta_zscore = 0.0
+            if (
+                voucher in self.SIGNAL_VOUCHERS
+                and prev_residual is not None
+                and len(delta_hist) >= self.RESIDUAL_DELTA_MIN_OBS
+                and delta_std > 1e-6
+            ):
+                delta_zscore = (residual_delta - delta_mean) / delta_std
+
+            residual_hist = data["residual_history"].get(voucher, [])
+            residual_scale = self._residual_scale(residual_hist, row["spread"])
+            residual_score = 0.0
+            residual_score_ready = len(residual_hist) >= self.RESIDUAL_SCORE_MIN_OBS and residual_scale > 1e-6
+            if residual_score_ready:
+                residual_score = residual / residual_scale
+
+            short_std = self._std(residual_hist[-self.COMPRESSION_SHORT_WINDOW :])
+            long_std = self._std(residual_hist[-self.COMPRESSION_LONG_WINDOW :])
+            compression_ratio = 1.0
+            if long_std > 1e-6:
+                compression_ratio = short_std / long_std
+            compression_ready = len(residual_hist) >= self.COMPRESSION_LONG_WINDOW and long_std > 1e-6
+            compression_active = (
+                compression_ready
+                and prev_residual is not None
+                and compression_ratio <= self.COMPRESSION_RATIO_TRIGGER
+                and abs(residual) >= abs(prev_residual) + self.COMPRESSION_SNAP_SPREAD_MULT * row["spread"]
+            )
+
+            reversion_series = residual_hist + [residual]
+            reversion_hit_rate, reversion_obs = self._mean_reversion_hit_rate(
+                reversion_series[-(self.DYNAMIC_REVERSION_WINDOW + 1) :]
+            )
+            outward_snap = residual * residual_delta > 0.0
+
+            snapshot[voucher] = {
+                "mid": row["mid"],
+                "best_bid": row["best_bid"],
+                "bid_vol": row["bid_vol"],
+                "best_ask": row["best_ask"],
+                "ask_vol": row["ask_vol"],
+                "spread": row["spread"],
+                "strike": strike,
+                "iv": row["iv"],
+                "vega": row["vega"],
+                "fitted_iv": fitted_iv,
+                "fair": fair,
+                "delta": delta,
+                "residual": residual,
+                "prev_residual": prev_residual,
+                "residual_delta": residual_delta,
+                "outward_snap": outward_snap,
+                "delta_mean": delta_mean,
+                "delta_std": delta_std,
+                "delta_zscore": delta_zscore,
+                "residual_scale": residual_scale,
+                "residual_score": residual_score,
+                "residual_score_ready": residual_score_ready,
+                "short_residual_std": short_std,
+                "long_residual_std": long_std,
+                "compression_ratio": compression_ratio,
+                "compression_active": compression_active,
+                "reversion_hit_rate": reversion_hit_rate,
+                "reversion_obs": reversion_obs,
+                "tte_years": tte,
+            }
+
+        return snapshot
+
+    def _trade_vouchers(
+        self,
+        state: TradingState,
+        data: Dict[str, Any],
+        smile: Dict[str, Dict[str, float]],
+        active_vouchers: Tuple[str, ...],
+        orders: Dict[str, List[Order]],
+    ) -> None:
+        pair_targets = {voucher: 0 for voucher in active_vouchers}
+        if self.ENABLE_IV_PAIR_TRADES:
+            self._apply_iv_pair_targets(state, data, smile, pair_targets)
+
+        late_session = state.timestamp >= self.LATE_SESSION_START
+        final_flatten = state.timestamp >= self.FINAL_FLATTEN_START
+
+        for voucher in active_vouchers:
+            snap = smile.get(voucher)
+            if snap is None:
+                continue
+
+            target = 0
+            if not final_flatten:
+                target = self._single_voucher_target(voucher, snap, late_session)
+                target += pair_targets.get(voucher, 0)
+                max_target = self._scaled_voucher_limit(snap["tte_years"], late_session)
+                target = max(-max_target, min(max_target, target))
+
+            trade_orders = self._rebalance_voucher(
+                voucher,
+                state,
+                state.position.get(voucher, 0),
+                self.POSITION_LIMITS[voucher],
+                snap,
+                target,
+            )
+            if trade_orders:
+                orders[voucher] = trade_orders
+
+    def _single_voucher_target(
+        self,
+        voucher: str,
+        snap: Dict[str, float],
+        late_session: bool,
+    ) -> int:
+        if self.USE_NORMALIZED_RESIDUAL_SCORE:
+            return self._normalized_residual_target(voucher, snap, late_session)
+        return self._baseline_residual_delta_target(voucher, snap, late_session)
+
+    def _baseline_residual_delta_target(
+        self,
+        voucher: str,
+        snap: Dict[str, float],
+        late_session: bool,
+    ) -> int:
+        prev_residual = snap["prev_residual"]
+        delta_std = snap["delta_std"]
+        delta_zscore = snap["delta_zscore"]
+        residual = snap["residual"]
+        residual_delta = snap["residual_delta"]
+        spread = snap["spread"]
+
+        if prev_residual is None or delta_std <= 1e-6:
+            return 0
+        if abs(residual) < max(self.MIN_RESIDUAL_ABS, 0.45 * spread):
+            return 0
+        if abs(delta_zscore) < self.RESIDUAL_DELTA_ENTRY_Z:
+            return 0
+        if residual * residual_delta <= 0.0:
+            return 0
+
+        scale = self.VOUCHER_SIZE_MULTIPLIER[voucher]
+        if late_session:
+            scale *= 0.5
+
+        z_excess = max(0.0, abs(delta_zscore) - self.RESIDUAL_DELTA_ENTRY_Z)
+        size_units = 1 + int(0.9 * z_excess + 0.2 * max(0.0, abs(residual) - self.MIN_RESIDUAL_ABS))
+        size = size_units * self.VOUCHER_TRADE_UNIT
+        size = min(size, self._scaled_voucher_limit(snap["tte_years"], late_session))
+        return -self._sign(residual) * max(self.VOUCHER_TRADE_UNIT, int(size * scale / self.VOUCHER_TRADE_UNIT) * self.VOUCHER_TRADE_UNIT)
+
+    def _normalized_residual_target(
+        self,
+        voucher: str,
+        snap: Dict[str, float],
+        late_session: bool,
+    ) -> int:
+        residual = snap["residual"]
+        residual_score = snap["residual_score"]
+        spread = snap["spread"]
+
+        if not snap["residual_score_ready"]:
+            return 0
+        if abs(residual) < max(self.MIN_RESIDUAL_ABS, 0.45 * spread):
+            return 0
+
+        entry_threshold = self.RESIDUAL_SCORE_ENTRY
+        if self.USE_COMPRESSION_TRIGGER and snap["compression_active"]:
+            threshold_scale = max(
+                self.COMPRESSION_THRESHOLD_SCALE_MIN,
+                min(1.0, snap["compression_ratio"]),
+            )
+            entry_threshold *= threshold_scale
+
+        if abs(residual_score) < entry_threshold:
+            return 0
+
+        scale = self.VOUCHER_SIZE_MULTIPLIER[voucher]
+        if late_session:
+            scale *= 0.5
+
+        score_excess = max(0.0, abs(residual_score) - entry_threshold)
+        size_units = 1 + int(1.0 * score_excess + 0.15 * max(0.0, abs(residual) - self.MIN_RESIDUAL_ABS))
+        size = size_units * self.VOUCHER_TRADE_UNIT
+        size = min(size, self._scaled_voucher_limit(snap["tte_years"], late_session))
+        rounded = max(
+            self.VOUCHER_TRADE_UNIT,
+            int(size * scale / self.VOUCHER_TRADE_UNIT) * self.VOUCHER_TRADE_UNIT,
+        )
+        return -self._sign(residual) * rounded
+
+    def _apply_iv_pair_targets(
+        self,
+        state: TradingState,
+        data: Dict[str, Any],
+        smile: Dict[str, Dict[str, float]],
+        targets: Dict[str, int],
+    ) -> None:
+        if state.timestamp >= self.LATE_SESSION_START:
+            return
+
+        current_diffs = self._current_iv_pair_diffs(smile)
+        for left, right in self._trade_pairs():
+            pair_name = self._pair_name(left, right)
+            current = current_diffs.get(pair_name)
+            if current is None:
+                continue
+
+            hist = data["iv_diff_history"].get(pair_name, [])
+            hist_std = self._std(hist) if len(hist) >= 2 else 0.0
+            if len(hist) < self.IV_DIFF_MIN_OBS or hist_std <= 1e-6:
+                continue
+
+            zscore = (current - self._mean(hist)) / hist_std
+            if abs(zscore) < self.IV_DIFF_ENTRY_Z:
+                continue
+
+            pair_qty = self.VOUCHER_TRADE_UNIT
+            if abs(zscore) >= self.IV_DIFF_ENTRY_Z + 0.8:
+                pair_qty += self.VOUCHER_TRADE_UNIT
+            pair_qty = min(pair_qty, self.IV_PAIR_TARGET)
+
+            if zscore > 0.0:
+                targets[left] += pair_qty
+                targets[right] -= pair_qty
+            else:
+                targets[left] -= pair_qty
+                targets[right] += pair_qty
+
+    def _rebalance_voucher(
+        self,
+        voucher: str,
+        state: TradingState,
+        position: int,
+        limit: int,
+        snap: Dict[str, float],
+        target: int,
+    ) -> List[Order]:
+        depth = state.order_depths[voucher]
+        fair = snap["fair"]
+        spread = snap["spread"]
+        residual = snap["residual"]
+        delta_zscore = snap["delta_zscore"]
+
+        entry_edge = max(self.ENTRY_EDGE_MIN, 0.35 * spread, 0.25 * abs(residual))
+        if abs(delta_zscore) >= self.RESIDUAL_DELTA_ENTRY_Z + 0.8:
+            entry_edge = max(0.5, entry_edge - 0.2 * spread)
+        exit_edge = max(self.EXIT_EDGE_MIN, 0.15 * spread)
+
+        orders: List[Order] = []
+
+        if target > position:
+            buy_need = min(limit - position, target - position)
+            if buy_need > 0:
+                best_bid = int(snap["best_bid"])
+                best_ask = int(snap["best_ask"])
+                if self._should_cross_touch(position, target):
+                    touch_qty = min(self.VOUCHER_TRADE_UNIT, buy_need)
+                    orders.append(Order(voucher, best_ask, touch_qty))
+                    buy_need -= touch_qty
+
+                if buy_need <= 0:
+                    return self._dedupe_orders(orders)
+
+                if target > 0:
+                    take_limit = int(math.floor(fair - entry_edge))
+                    passive_limit = int(math.floor(fair - exit_edge))
+                else:
+                    take_limit = int(math.floor(fair + exit_edge))
+                    passive_limit = int(math.floor(fair))
+
+                aggressive, bought = self._buy_up_to(voucher, depth, buy_need, take_limit)
+                orders.extend(aggressive)
+
+                remaining = buy_need - bought
+                if remaining > 0:
+                    passive_price = min(best_bid + 1, passive_limit)
+                    if passive_price < best_ask:
+                        orders.append(Order(voucher, passive_price, min(self.VOUCHER_PASSIVE_UNIT, remaining)))
+
+        elif target < position:
+            sell_need = min(limit + position, position - target)
+            if sell_need > 0:
+                best_bid = int(snap["best_bid"])
+                best_ask = int(snap["best_ask"])
+                if self._should_cross_touch(position, target):
+                    touch_qty = min(self.VOUCHER_TRADE_UNIT, sell_need)
+                    orders.append(Order(voucher, best_bid, -touch_qty))
+                    sell_need -= touch_qty
+
+                if sell_need <= 0:
+                    return self._dedupe_orders(orders)
+
+                if target < 0:
+                    take_limit = int(math.ceil(fair + entry_edge))
+                    passive_limit = int(math.ceil(fair + exit_edge))
+                else:
+                    take_limit = int(math.ceil(fair - exit_edge))
+                    passive_limit = int(math.ceil(fair))
+
+                aggressive, sold = self._sell_down_to(voucher, depth, sell_need, take_limit)
+                orders.extend(aggressive)
+
+                remaining = sell_need - sold
+                if remaining > 0:
+                    passive_price = max(best_ask - 1, passive_limit)
+                    if passive_price > best_bid:
+                        orders.append(Order(voucher, passive_price, -min(self.VOUCHER_PASSIVE_UNIT, remaining)))
+
+        return self._dedupe_orders(orders)
+
+    def _trade_vertical_spreads(
+        self, state: TradingState, orders: Dict[str, List[Order]]
+    ) -> None:
+        ordered = sorted(self.ALL_VOUCHERS, key=lambda name: self.VOUCHER_STRIKES[name])
+        for low, high in zip(ordered[:-1], ordered[1:]):
+            low_depth = state.order_depths.get(low)
+            high_depth = state.order_depths.get(high)
+            if low_depth is None or high_depth is None:
+                continue
+
+            low_top = self._top_of_book(low_depth)
+            high_top = self._top_of_book(high_depth)
+            if low_top is None or high_top is None:
+                continue
+
+            low_bid, low_bid_vol, low_ask, low_ask_vol, _low_mid, _ = low_top
+            high_bid, high_bid_vol, high_ask, high_ask_vol, _high_mid, _ = high_top
+            max_spread = self.VOUCHER_STRIKES[high] - self.VOUCHER_STRIKES[low]
+
+            executable_spread = low_bid - high_ask
+            if executable_spread > max_spread + self.ARB_EDGE:
+                low_effective_pos = state.position.get(low, 0) + self._net_order_quantity(orders.get(low, []))
+                high_effective_pos = state.position.get(high, 0) + self._net_order_quantity(orders.get(high, []))
+                qty = min(
+                    self.ARB_MAX_QTY,
+                    low_bid_vol,
+                    high_ask_vol,
+                    self.POSITION_LIMITS[low] + low_effective_pos,
+                    self.POSITION_LIMITS[high] - high_effective_pos,
+                )
+                if qty > 0:
+                    orders.setdefault(low, []).append(Order(low, int(low_bid), -int(qty)))
+                    orders.setdefault(high, []).append(Order(high, int(high_ask), int(qty)))
+
+            executable_spread = low_ask - high_bid
+            if executable_spread < -self.ARB_EDGE:
+                low_effective_pos = state.position.get(low, 0) + self._net_order_quantity(orders.get(low, []))
+                high_effective_pos = state.position.get(high, 0) + self._net_order_quantity(orders.get(high, []))
+                qty = min(
+                    self.ARB_MAX_QTY,
+                    low_ask_vol,
+                    high_bid_vol,
+                    self.POSITION_LIMITS[low] - low_effective_pos,
+                    self.POSITION_LIMITS[high] + high_effective_pos,
+                )
+                if qty > 0:
+                    orders.setdefault(low, []).append(Order(low, int(low_ask), int(qty)))
+                    orders.setdefault(high, []).append(Order(high, int(high_bid), -int(qty)))
+
+        for product, product_orders in list(orders.items()):
+            orders[product] = self._dedupe_orders(product_orders)
+            if not orders[product]:
+                orders.pop(product, None)
+
+    def _active_trade_vouchers(self, smile: Dict[str, Dict[str, float]]) -> Tuple[str, ...]:
+        if not self.USE_DYNAMIC_STRIKE_ACTIVATION:
+            return self.CORE_TRADE_VOUCHERS
+
+        active = list(self.CORE_TRADE_VOUCHERS)
+        for voucher in self.EXPANSION_TRADE_VOUCHERS:
+            snap = smile.get(voucher)
+            if snap is None:
+                continue
+            if self._dynamic_voucher_is_active(snap):
+                active.append(voucher)
+
+        active.sort(key=lambda name: self.VOUCHER_STRIKES[name])
+        return tuple(active)
+
+    def _dynamic_voucher_is_active(self, snap: Dict[str, float]) -> bool:
+        if snap["vega"] < self.DYNAMIC_ACTIVATION_VEGA_MIN:
+            return False
+        if snap["reversion_obs"] < self.DYNAMIC_REVERSION_MIN_OBS:
+            return False
+        if snap["reversion_hit_rate"] < self.DYNAMIC_REVERSION_HIT_RATE_MIN:
+            return False
+        return True
+
+    def _tte_years(self, state: TradingState) -> float:
+        observations = getattr(state, "observations", None)
+        if observations is not None:
+            plain = getattr(observations, "plainValueObservations", None)
+            if isinstance(plain, dict):
+                millidays = plain.get("ROUND3_TTE_MILLIDAYS")
+                if self._is_finite_number(millidays):
+                    tte_days = float(millidays) / 1000.0
+                    return max(0.5 / self.DAYS_PER_YEAR, tte_days / self.DAYS_PER_YEAR)
+
+        tte_days = self.LIVE_EXPIRY_DAYS_AT_START - float(state.timestamp) / 1_000_000.0
+        return max(0.5 / self.DAYS_PER_YEAR, tte_days / self.DAYS_PER_YEAR)
+
+    def _top_of_book(self, depth: OrderDepth) -> Optional[Tuple[int, int, int, int, float, float]]:
+        if not depth.buy_orders or not depth.sell_orders:
+            return None
+
+        best_bid = max(depth.buy_orders)
+        best_ask = min(depth.sell_orders)
+        bid_vol = max(0, depth.buy_orders[best_bid])
+        ask_vol = max(0, -depth.sell_orders[best_ask])
+        mid = 0.5 * (best_bid + best_ask)
+        spread = float(best_ask - best_bid)
+        return best_bid, bid_vol, best_ask, ask_vol, mid, spread
+
+    def _mid_price(self, depth: Optional[OrderDepth]) -> Optional[float]:
+        top = self._top_of_book(depth) if depth is not None else None
+        if top is None:
+            return None
+        return top[4]
+
+    def _buy_up_to(
+        self, product: str, depth: OrderDepth, max_qty: int, limit_price: int
+    ) -> Tuple[List[Order], int]:
+        orders: List[Order] = []
+        bought = 0
+        for ask in sorted(depth.sell_orders):
+            if ask > limit_price or bought >= max_qty:
+                break
+            available = -depth.sell_orders[ask]
+            qty = min(max_qty - bought, available)
+            if qty <= 0:
+                continue
+            orders.append(Order(product, int(ask), int(qty)))
+            bought += qty
+        return orders, bought
+
+    def _sell_down_to(
+        self, product: str, depth: OrderDepth, max_qty: int, limit_price: int
+    ) -> Tuple[List[Order], int]:
+        orders: List[Order] = []
+        sold = 0
+        for bid in sorted(depth.buy_orders, reverse=True):
+            if bid < limit_price or sold >= max_qty:
+                break
+            available = depth.buy_orders[bid]
+            qty = min(max_qty - sold, available)
+            if qty <= 0:
+                continue
+            orders.append(Order(product, int(bid), -int(qty)))
+            sold += qty
+        return orders, sold
+
+    def _dedupe_orders(self, orders: List[Order]) -> List[Order]:
+        merged: Dict[Tuple[str, int], int] = {}
+        for order in orders:
+            key = (order.symbol, order.price)
+            merged[key] = merged.get(key, 0) + order.quantity
+
+        result: List[Order] = []
+        for (symbol, price), qty in merged.items():
+            if qty != 0:
+                result.append(Order(symbol, int(price), int(qty)))
+
+        result.sort(key=lambda order: (order.symbol, order.price, order.quantity))
+        return result
+
+    def _net_order_quantity(self, orders: List[Order]) -> int:
+        return sum(order.quantity for order in orders)
+
+    def _mean(self, values: List[float]) -> float:
+        if not values:
+            return 0.0
+        return sum(values) / float(len(values))
+
+    def _median(self, values: List[float]) -> float:
+        if not values:
+            return 0.0
+        ordered = sorted(values)
+        mid = len(ordered) // 2
+        if len(ordered) % 2 == 1:
+            return ordered[mid]
+        return 0.5 * (ordered[mid - 1] + ordered[mid])
+
+    def _mad(self, values: List[float]) -> float:
+        if not values:
+            return 0.0
+        center = self._median(values)
+        deviations = [abs(value - center) for value in values]
+        return self._median(deviations)
+
+    def _residual_scale(self, values: List[float], spread: float) -> float:
+        if len(values) < self.RESIDUAL_SCORE_MIN_OBS:
+            return 0.0
+        mad = self._mad(values)
+        scaled_mad = self.RESIDUAL_MAD_TO_SIGMA * mad
+        return max(self.RESIDUAL_MAD_FLOOR, scaled_mad, self.RESIDUAL_SCALE_SPREAD_MULT * spread)
+
+    def _mean_reversion_hit_rate(self, values: List[float]) -> Tuple[float, int]:
+        if len(values) < 2:
+            return 0.0, 0
+
+        successes = 0
+        observations = 0
+        for prev_value, next_value in zip(values[:-1], values[1:]):
+            if abs(prev_value) < 1e-6:
+                continue
+            observations += 1
+            if abs(next_value) < abs(prev_value):
+                successes += 1
+
+        if observations == 0:
+            return 0.0, 0
+        return successes / float(observations), observations
+
+    def _std(self, values: List[float]) -> float:
+        if len(values) < 2:
+            return 0.0
+        mu = self._mean(values)
+        var = sum((value - mu) * (value - mu) for value in values) / float(len(values) - 1)
+        return math.sqrt(max(0.0, var))
+
+    def _norm_cdf(self, x: float) -> float:
+        return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
+
+    def _norm_pdf(self, x: float) -> float:
+        return math.exp(-0.5 * x * x) / math.sqrt(2.0 * math.pi)
+
+    def _bs_call_price(self, spot: float, strike: float, tte: float, sigma: float) -> float:
+        intrinsic = max(spot - strike, 0.0)
+        if tte <= 0.0 or sigma <= 1e-6 or spot <= 0.0 or strike <= 0.0:
+            return intrinsic
+
+        vol_sqrt_t = sigma * math.sqrt(tte)
+        d1 = (math.log(spot / strike) + 0.5 * sigma * sigma * tte) / vol_sqrt_t
+        d2 = d1 - vol_sqrt_t
+        return spot * self._norm_cdf(d1) - strike * self._norm_cdf(d2)
+
+    def _bs_delta(self, spot: float, strike: float, tte: float, sigma: float) -> float:
+        if tte <= 0.0 or sigma <= 1e-6 or spot <= 0.0 or strike <= 0.0:
+            return 1.0 if spot > strike else 0.0
+
+        vol_sqrt_t = sigma * math.sqrt(tte)
+        d1 = (math.log(spot / strike) + 0.5 * sigma * sigma * tte) / vol_sqrt_t
+        return self._norm_cdf(d1)
+
+    def _bs_vega(self, spot: float, strike: float, tte: float, sigma: float) -> float:
+        if tte <= 0.0 or sigma <= 1e-6 or spot <= 0.0 or strike <= 0.0:
+            return 0.0
+
+        vol_sqrt_t = sigma * math.sqrt(tte)
+        d1 = (math.log(spot / strike) + 0.5 * sigma * sigma * tte) / vol_sqrt_t
+        return spot * self._norm_pdf(d1) * math.sqrt(tte)
+
+    def _implied_vol(
+        self, price: float, spot: float, strike: float, tte: float, sigma_init: float
+    ) -> Optional[float]:
+        intrinsic = max(spot - strike, 0.0)
+        if tte <= 0.0 or spot <= 0.0 or strike <= 0.0:
+            return None
+        if price <= intrinsic + 0.5:
+            return None
+
+        sigma = min(self.IMPLIED_VOL_MAX, max(0.05, sigma_init))
+        for _ in range(20):
+            model = self._bs_call_price(spot, strike, tte, sigma)
+            vega = self._bs_vega(spot, strike, tte, sigma)
+            if vega < self.VEGA_FLOOR:
+                return None
+
+            error = model - price
+            step = error / vega
+            sigma = min(self.IMPLIED_VOL_MAX, max(0.02, sigma - step))
+            if abs(step) < 1e-5:
+                break
+
+        if self._bs_vega(spot, strike, tte, sigma) < self.VEGA_FLOOR:
+            return None
+        return sigma
+
+    def _fit_weighted_quadratic(
+        self, points: List[Tuple[float, float, float]]
+    ) -> Optional[Tuple[float, float, float]]:
+        if len(points) < 4:
+            return None
+
+        s0 = s1 = s2 = s3 = s4 = 0.0
+        t0 = t1 = t2 = 0.0
+        for x, y, w in points:
+            w = max(1e-6, w)
+            x2 = x * x
+            s0 += w
+            s1 += w * x
+            s2 += w * x2
+            s3 += w * x2 * x
+            s4 += w * x2 * x2
+            t0 += w * y
+            t1 += w * x * y
+            t2 += w * x2 * y
+
+        matrix = [
+            [s0, s1, s2, t0],
+            [s1, s2, s3, t1],
+            [s2, s3, s4, t2],
+        ]
+
+        for col in range(3):
+            pivot = max(range(col, 3), key=lambda row: abs(matrix[row][col]))
+            if abs(matrix[pivot][col]) < 1e-12:
+                return None
+            if pivot != col:
+                matrix[col], matrix[pivot] = matrix[pivot], matrix[col]
+
+            pivot_value = matrix[col][col]
+            for k in range(col, 4):
+                matrix[col][k] /= pivot_value
+
+            for row in range(3):
+                if row == col:
+                    continue
+                factor = matrix[row][col]
+                for k in range(col, 4):
+                    matrix[row][k] -= factor * matrix[col][k]
+
+        return matrix[0][3], matrix[1][3], matrix[2][3]
+
+    def _scaled_voucher_limit(self, tte_years: float, late_session: bool) -> int:
+        tte_days = tte_years * self.DAYS_PER_YEAR
+        expiry_scale = 0.35 + 0.65 * max(0.0, min(1.0, (tte_days - 1.0) / 4.0))
+        if late_session:
+            expiry_scale *= 0.55
+        size = int(self.VOUCHER_MAX_TARGET * expiry_scale)
+        rounded = max(self.VOUCHER_TRADE_UNIT, (size // self.VOUCHER_TRADE_UNIT) * self.VOUCHER_TRADE_UNIT)
+        return rounded
+
+    def _trade_pairs(self) -> Tuple[Tuple[str, str], ...]:
+        return (
+            ("VEV_5200", "VEV_5300"),
+            ("VEV_5300", "VEV_5400"),
+        )
+
+    def _pair_name(self, left: str, right: str) -> str:
+        return f"{left}|{right}"
+
+    def _pair_names(self) -> Tuple[str, ...]:
+        return tuple(self._pair_name(left, right) for left, right in self._trade_pairs())
+
+    def _current_iv_pair_diffs(self, smile: Dict[str, Dict[str, float]]) -> Dict[str, float]:
+        diffs: Dict[str, float] = {}
+        for left, right in self._trade_pairs():
+            left_snap = smile.get(left)
+            right_snap = smile.get(right)
+            if left_snap is None or right_snap is None:
+                continue
+            diffs[self._pair_name(left, right)] = right_snap["iv"] - left_snap["iv"]
+        return diffs
+
+    def _sign(self, value: float) -> int:
+        if value > 0.0:
+            return 1
+        if value < 0.0:
+            return -1
+        return 0
+
+    def _should_cross_touch(self, position: int, target: int) -> bool:
+        if position == target:
+            return False
+        if position == 0:
+            return True
+        if self._sign(position) != self._sign(target):
+            return True
+        return abs(target) > abs(position)
+
+    def _is_finite_number(self, value: Any) -> bool:
+        if isinstance(value, bool):
+            return False
+        if not isinstance(value, (int, float)):
+            return False
+        return math.isfinite(float(value))
