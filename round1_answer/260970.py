@@ -11,6 +11,7 @@ class Trader:
     """
 
     POSITION_LIMIT = 80
+    MARKET_ACCESS_FEE = 0
 
     IPR = "INTARIAN_PEPPER_ROOT"
     ACO = "ASH_COATED_OSMIUM"
@@ -26,6 +27,9 @@ class Trader:
     ACO_EMA_ALPHA = 0.002           # ~500-tick half-life, tracks anchor not noise
     ACO_WARMUP = 50                 # let EMA stabilize before trading
     ACO_POSITION_SKEW = 0.10        # skew fair value per unit of position
+
+    def bid(self):
+        return self.MARKET_ACCESS_FEE
 
     def run(self, state: TradingState):
         try:

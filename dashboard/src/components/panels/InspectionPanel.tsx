@@ -2,12 +2,28 @@ import { Panel } from "./Panel";
 import { useDashboard } from "../../state/DashboardProvider";
 import { formatPrice, formatQuantity, formatTimestamp } from "../../utils/formatters";
 
+function renderTradeSummaryLabel(kind: string) {
+  if (kind === "ownTrade") {
+    return "Own";
+  }
+
+  if (kind === "trade") {
+    return "Market";
+  }
+
+  return "Event";
+}
+
 export function InspectionPanel() {
   const { inspection } = useDashboard();
   const spread =
     inspection.nearestVisibleBid && inspection.nearestVisibleAsk
       ? inspection.nearestVisibleAsk.price - inspection.nearestVisibleBid.price
       : null;
+  const hoveredTrades = [
+    ...inspection.visibleOwnTradesAtHoveredTimestamp,
+    ...inspection.visibleTradesAtHoveredTimestamp,
+  ];
 
   return (
     <Panel title="Inspection">
@@ -64,6 +80,36 @@ export function InspectionPanel() {
           <span className="inspection-label">Active Filters</span>
           <strong>{inspection.activeFilterSummary.length ? inspection.activeFilterSummary.join(" | ") : "None"}</strong>
         </div>
+      </div>
+      <div className="inspection-trades">
+        <div className="inspection-trades__header">
+          <span className="inspection-label">Trades At Hovered Timestamp</span>
+          <strong>{hoveredTrades.length}</strong>
+        </div>
+        {hoveredTrades.length === 0 ? (
+          <p className="inspection-trades__empty">No visible trades at this timestamp.</p>
+        ) : (
+          <div className="inspection-trades__list">
+            {hoveredTrades.map((trade) => (
+              <div className="inspection-trades__row" key={`${trade.id}-${trade.kind}`}>
+                <div className="inspection-trades__meta">
+                  <strong>{renderTradeSummaryLabel(trade.kind)}</strong>
+                  <span>{trade.side?.toUpperCase() ?? "TRADE"}</span>
+                  {trade.traderClass ? <span>{trade.traderClass}</span> : null}
+                </div>
+                <div className="inspection-trades__stats">
+                  <span>{formatPrice(trade.price)}</span>
+                  <span>x {formatQuantity(trade.quantity)}</span>
+                </div>
+                <div className="inspection-trades__participants">
+                  <span>B: {trade.buyer ?? "-"}</span>
+                  <span>S: {trade.seller ?? "-"}</span>
+                  {trade.traderId ? <span>T: {trade.traderId}</span> : null}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
     </Panel>
   );

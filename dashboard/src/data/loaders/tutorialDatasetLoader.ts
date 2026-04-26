@@ -1,6 +1,7 @@
 import type {
   BookLevel,
   BookSnapshot,
+  DataSourceKind,
   IndicatorSeries,
   LogEntry,
   MarketDataset,
@@ -19,11 +20,11 @@ interface TutorialDatasetFileConfig {
   id: string;
   name: string;
   description: string;
+  source: DataSourceKind;
   day: number;
   round: number;
   pricesPath: string;
   tradesPath: string;
-  productFilter?: string;
 }
 
 interface TutorialPriceRow {
@@ -61,6 +62,7 @@ const tutorialDatasetConfigs: TutorialDatasetFileConfig[] = [
     id: "tutorial-round-0-day--2",
     name: "Tutorial Stage Day -2",
     description: "Round 0 tutorial order book and trades for day -2.",
+    source: "tutorial",
     day: -2,
     round: 0,
     pricesPath: "/tutorial/data/prices_round_0_day_-2.csv",
@@ -70,97 +72,41 @@ const tutorialDatasetConfigs: TutorialDatasetFileConfig[] = [
     id: "tutorial-round-0-day--1",
     name: "Tutorial Stage Day -1",
     description: "Round 0 tutorial order book and trades for day -1.",
+    source: "tutorial",
     day: -1,
     round: 0,
     pricesPath: "/tutorial/data/prices_round_0_day_-1.csv",
     tradesPath: "/tutorial/data/trades_round_0_day_-1.csv",
   },
   {
-    id: "round-1-day--2",
-    name: "Round 1 Day -2 (All Products)",
-    description: "Round 1 order book and trades for day -2.",
-    day: -2,
-    round: 1,
-    pricesPath: "/round1/data/prices_round_1_day_-2.csv",
-    tradesPath: "/round1/data/trades_round_1_day_-2.csv",
-  },
-  {
-    id: "round-1-day--1",
-    name: "Round 1 Day -1 (All Products)",
-    description: "Round 1 order book and trades for day -1.",
+    id: "historical-round-2-day--1",
+    name: "Round 2 Market Data Day -1",
+    description: "Round 2 historical order book and trades for day -1.",
+    source: "historical",
     day: -1,
-    round: 1,
-    pricesPath: "/round1/data/prices_round_1_day_-1.csv",
-    tradesPath: "/round1/data/trades_round_1_day_-1.csv",
+    round: 2,
+    pricesPath: "/round2/data/prices_round_2_day_-1.csv",
+    tradesPath: "/round2/data/trades_round_2_day_-1.csv",
   },
   {
-    id: "round-1-day-0",
-    name: "Round 1 Day 0 (All Products)",
-    description: "Round 1 order book and trades for day 0.",
+    id: "historical-round-2-day-0",
+    name: "Round 2 Market Data Day 0",
+    description: "Round 2 historical order book and trades for day 0.",
+    source: "historical",
     day: 0,
-    round: 1,
-    pricesPath: "/round1/data/prices_round_1_day_0.csv",
-    tradesPath: "/round1/data/trades_round_1_day_0.csv",
+    round: 2,
+    pricesPath: "/round2/data/prices_round_2_day_0.csv",
+    tradesPath: "/round2/data/trades_round_2_day_0.csv",
   },
   {
-    id: "round-1-osmium-day--2",
-    name: "Round 1 Osmium Day -2",
-    description: "ASH_COATED_OSMIUM order book and trades for day -2.",
-    day: -2,
-    round: 1,
-    pricesPath: "/round1/data/prices_round_1_day_-2.csv",
-    tradesPath: "/round1/data/trades_round_1_day_-2.csv",
-    productFilter: "ASH_COATED_OSMIUM",
-  },
-  {
-    id: "round-1-osmium-day--1",
-    name: "Round 1 Osmium Day -1",
-    description: "ASH_COATED_OSMIUM order book and trades for day -1.",
-    day: -1,
-    round: 1,
-    pricesPath: "/round1/data/prices_round_1_day_-1.csv",
-    tradesPath: "/round1/data/trades_round_1_day_-1.csv",
-    productFilter: "ASH_COATED_OSMIUM",
-  },
-  {
-    id: "round-1-osmium-day-0",
-    name: "Round 1 Osmium Day 0",
-    description: "ASH_COATED_OSMIUM order book and trades for day 0.",
-    day: 0,
-    round: 1,
-    pricesPath: "/round1/data/prices_round_1_day_0.csv",
-    tradesPath: "/round1/data/trades_round_1_day_0.csv",
-    productFilter: "ASH_COATED_OSMIUM",
-  },
-  {
-    id: "round-1-pepper-day--2",
-    name: "Round 1 Pepper Root Day -2",
-    description: "INTARIAN_PEPPER_ROOT order book and trades for day -2.",
-    day: -2,
-    round: 1,
-    pricesPath: "/round1/data/prices_round_1_day_-2.csv",
-    tradesPath: "/round1/data/trades_round_1_day_-2.csv",
-    productFilter: "INTARIAN_PEPPER_ROOT",
-  },
-  {
-    id: "round-1-pepper-day--1",
-    name: "Round 1 Pepper Root Day -1",
-    description: "INTARIAN_PEPPER_ROOT order book and trades for day -1.",
-    day: -1,
-    round: 1,
-    pricesPath: "/round1/data/prices_round_1_day_-1.csv",
-    tradesPath: "/round1/data/trades_round_1_day_-1.csv",
-    productFilter: "INTARIAN_PEPPER_ROOT",
-  },
-  {
-    id: "round-1-pepper-day-0",
-    name: "Round 1 Pepper Root Day 0",
-    description: "INTARIAN_PEPPER_ROOT order book and trades for day 0.",
-    day: 0,
-    round: 1,
-    pricesPath: "/round1/data/prices_round_1_day_0.csv",
-    tradesPath: "/round1/data/trades_round_1_day_0.csv",
-    productFilter: "INTARIAN_PEPPER_ROOT",
+    id: "historical-round-2-day-1",
+    name: "Round 2 Market Data Day 1",
+    description: "Round 2 historical order book and trades for day 1.",
+    source: "historical",
+    day: 1,
+    round: 2,
+    pricesPath: "/round2/data/prices_round_2_day_1.csv",
+    tradesPath: "/round2/data/trades_round_2_day_1.csv",
   },
 ];
 
@@ -365,7 +311,7 @@ function createProductData(
       quantity: trade.quantity,
       side: sideInfo.side,
       aggressor: sideInfo.aggressor,
-      traderId: trade.buyer || trade.seller || trade.currency || undefined,
+      traderId: trade.buyer || trade.seller || undefined,
       traderGroup: trade.currency ? "market-data" : undefined,
       tradeType: sideInfo.aggressor === "unknown" ? "unknown" : "taker",
     };
@@ -414,15 +360,8 @@ export async function loadTutorialDatasets(): Promise<MarketDataset[]> {
         pricesResponse.text(),
         tradesResponse.text(),
       ]);
-      const allPriceRows = parsePriceRows(pricesText);
-      const allTradeRows = parseTradeRows(tradesText);
-
-      const priceRows = config.productFilter
-        ? allPriceRows.filter((row) => row.product === config.productFilter)
-        : allPriceRows;
-      const tradeRows = config.productFilter
-        ? allTradeRows.filter((row) => row.symbol === config.productFilter)
-        : allTradeRows;
+      const priceRows = parsePriceRows(pricesText);
+      const tradeRows = parseTradeRows(tradesText);
 
       const productIds = [...new Set(priceRows.map((row) => row.product))];
       const products = productIds.map((productId) =>
@@ -437,7 +376,7 @@ export async function loadTutorialDatasets(): Promise<MarketDataset[]> {
         id: config.id,
         name: config.name,
         description: config.description,
-        source: "tutorial",
+        source: config.source,
         createdAt: new Date().toISOString(),
         products,
         metadata: {

@@ -14,6 +14,7 @@ import type {
   Trade,
   OwnTrade,
   TradeFilterSupport,
+  TraderClass,
 } from "../types/market";
 
 export interface PerformanceSummary {
@@ -40,6 +41,7 @@ export interface TradeTapeRow {
   seller?: string;
   traderId?: string;
   traderGroup?: string;
+  traderClass?: TraderClass;
 }
 
 export interface ProductPerformanceRow {
@@ -54,6 +56,16 @@ export interface ProductPerformanceRow {
   ownTradeCount: number;
   marketTradeCount: number;
 }
+
+export const TRADER_CLASS_ORDER: TraderClass[] = ["M", "S", "B", "I", "F"];
+
+type FilterableTradeLike = {
+  kind: string;
+  quantity: number;
+  traderClass?: TraderClass;
+  traderGroup?: string;
+  traderId?: string;
+};
 
 function nearestByTimestamp<T extends { timestamp: number }>(items: T[], timestamp: Timestamp | null): T | null {
   if (timestamp === null || items.length === 0) {
@@ -89,7 +101,208 @@ function flattenSnapshotLevels(
   );
 }
 
-function tradesToEvents(trades: Trade[], kind: "trade" | "ownTrade"): MarketEvent[] {
+function getSnapshotMidPrice(snapshot: BookSnapshot | null) {
+  if (!snapshot) {
+    return null;
+  }
+
+  const bestBid = snapshot.bids[0]?.price;
+  const bestAsk = snapshot.asks[0]?.price;
+
+  if (bestBid !== undefined && bestAsk !== undefined) {
+    return (bestBid + bestAsk) / 2;
+  }
+
+  if (bestBid !== undefined) {
+    return bestBid;
+  }
+
+  if (bestAsk !== undefined) {
+    return bestAsk;
+  }
+
+  return null;
+}
+
+function getNearestSnapshotIndex(snapshots: BookSnapshot[], timestamp: number) {
+  if (snapshots.length === 0) {
+    return null;
+  }
+
+  return snapshots.reduce<number>((closestIndex, snapshot, index) => {
+    if (index === 0) {
+      return index;
+    }
+
+    return Math.abs(snapshot.timestamp - timestamp) < Math.abs(snapshots[closestIndex].timestamp - timestamp)
+      ? index
+      : closestIndex;
+  }, 0);
+}
+
+function inferExplicitTraderClass(values: Array<string | undefined>): TraderClass | null {
+  const aliases: Record<string, TraderClass> = {
+    M: "M",
+    MAKER: "M",
+    S: "S",
+    SMALL: "S",
+    B: "B",
+    BIG: "B",
+    I: "I",
+    INFORMED: "I",
+    F: "F",
+    OWN: "F",
+    INTERNAL: "F",
+    SUBMISSION: "F",
+  };
+
+  for (const value of values) {
+    if (!value) {
+      continue;
+    }
+
+    const tokens = value.toUpperCase().split(/[^A-Z0-9]+/).filter(Boolean);
+    for (const token of tokens) {
+      const normalized = token.replace(/\d+$/u, "");
+      if (aliases[normalized]) {
+        return aliases[normalized];
+      }
+    }
+  }
+
+  return null;
+}
+
+function getBigTradeThreshold(trades: Trade[]) {
+  const sortedQuantities = trades
+    .filter((trade) => trade.tradeType === "taker" || trade.tradeType === "unknown")
+    .map((trade) => trade.quantity)
+    .sort((left, right) => left - right);
+
+  if (sortedQuantities.length === 0) {
+    return null;
+  }
+
+  const quantileIndex = Math.min(sortedQuantities.length - 1, Math.floor(sortedQuantities.length * 0.75));
+  return sortedQuantities[quantileIndex];
+}
+
+function isInformedTrade(product: ProductMarketData, trade: Trade, bigTradeThreshold: number | null) {
+  if (trade.tradeType !== "taker") {
+    return false;
+  }
+
+  if (bigTradeThreshold !== null && trade.quantity < bigTradeThreshold) {
+    return false;
+  }
+
+  const nearestIndex = getNearestSnapshotIndex(product.bookSnapshots, trade.timestamp);
+  if (nearestIndex === null) {
+    return false;
+  }
+
+  const currentSnapshot = product.bookSnapshots[nearestIndex] ?? null;
+  const nextSnapshot =
+    product.bookSnapshots[Math.min(nearestIndex + 1, product.bookSnapshots.length - 1)] ?? null;
+  const currentMid = getSnapshotMidPrice(currentSnapshot);
+  const nextMid = getSnapshotMidPrice(nextSnapshot);
+
+  if (currentMid === null || nextMid === null || currentSnapshot?.timestamp === nextSnapshot?.timestamp) {
+    return false;
+  }
+
+  const spread =
+    currentSnapshot?.bids[0] && currentSnapshot.asks[0]
+      ? currentSnapshot.asks[0].price - currentSnapshot.bids[0].price
+      : product.product.tickSize ?? 1;
+  const direction = trade.side === "buy" ? 1 : -1;
+  const alignedMove = (nextMid - currentMid) * direction;
+
+  return alignedMove >= Math.max(product.product.tickSize ?? 1, spread * 0.5);
+}
+
+function classifyTrade(
+  product: ProductMarketData,
+  trade: Trade | OwnTrade,
+  kind: "trade" | "ownTrade",
+  bigTradeThreshold: number | null,
+): TraderClass {
+  const explicitTraderClass = inferExplicitTraderClass([
+    trade.traderClass,
+    trade.traderGroup,
+    trade.traderId,
+    trade.buyer,
+    trade.seller,
+  ]);
+
+  if (explicitTraderClass) {
+    return explicitTraderClass;
+  }
+
+  if (kind === "ownTrade") {
+    return "F";
+  }
+
+  if (trade.tradeType === "maker") {
+    return "M";
+  }
+
+  if (isInformedTrade(product, trade as Trade, bigTradeThreshold)) {
+    return "I";
+  }
+
+  if (bigTradeThreshold !== null && trade.quantity >= bigTradeThreshold) {
+    return "B";
+  }
+
+  return "S";
+}
+
+function matchesTradeFilters(item: FilterableTradeLike, state: DashboardState) {
+  const quantityRange = state.filters.quantityRange;
+  const isOwn = item.kind === "ownTrade" || item.kind === "own";
+
+  if (isOwn && !state.visibility.ownTrades) {
+    return false;
+  }
+
+  if (!isOwn && !state.visibility.trades) {
+    return false;
+  }
+
+  if (
+    quantityRange &&
+    ((quantityRange[0] !== null && item.quantity < quantityRange[0]) ||
+      (quantityRange[1] !== null && item.quantity > quantityRange[1]))
+  ) {
+    return false;
+  }
+
+  if (!item.traderClass || !state.filters.selectedTraderClasses.includes(item.traderClass)) {
+    return false;
+  }
+
+  if (state.filters.selectedTraderGroups.length > 0) {
+    if (!item.traderGroup || !state.filters.selectedTraderGroups.includes(item.traderGroup)) {
+      return false;
+    }
+  }
+
+  if (state.filters.selectedTraderIds.length > 0) {
+    if (!item.traderId || !state.filters.selectedTraderIds.includes(item.traderId)) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+function tradesToEvents(
+  product: ProductMarketData,
+  trades: Trade[],
+  kind: "trade" | "ownTrade",
+  bigTradeThreshold: number | null,
+): MarketEvent[] {
   return trades.map((trade) => ({
     id: trade.id,
     timestamp: trade.timestamp,
@@ -100,14 +313,23 @@ function tradesToEvents(trades: Trade[], kind: "trade" | "ownTrade"): MarketEven
     side: trade.side,
     label: kind === "ownTrade" ? "Own trade" : `${trade.side.toUpperCase()} trade`,
     tradeType: kind === "ownTrade" ? "maker" : trade.tradeType,
+    buyer: trade.buyer,
+    seller: trade.seller,
     traderId: trade.traderId,
     traderGroup: trade.traderGroup,
+    traderClass: classifyTrade(product, trade, kind, bigTradeThreshold),
   }));
 }
 
-function eventMatchesFilters(event: MarketEvent, state: DashboardState, support: TradeFilterSupport) {
-  const quantityRange = state.filters.quantityRange;
+function eventsAtTimestamp(events: MarketEvent[], timestamp: Timestamp | null) {
+  if (timestamp === null) {
+    return [] as MarketEvent[];
+  }
 
+  return events.filter((event) => event.timestamp === timestamp);
+}
+
+function eventMatchesFilters(event: MarketEvent, state: DashboardState, support: TradeFilterSupport) {
   if (event.kind === "bid") {
     return state.visibility.bids;
   }
@@ -117,63 +339,11 @@ function eventMatchesFilters(event: MarketEvent, state: DashboardState, support:
   }
 
   if (event.kind === "trade") {
-    if (!state.visibility.trades) {
-      return false;
-    }
-
-    if (
-      quantityRange &&
-      ((quantityRange[0] !== null && event.quantity < quantityRange[0]) ||
-        (quantityRange[1] !== null && event.quantity > quantityRange[1]))
-    ) {
-      return false;
-    }
-
-    if (state.filters.tradeType === "own") {
-      return false;
-    }
-
-    if (state.filters.tradeType !== "all" && event.tradeType !== state.filters.tradeType) {
-      return false;
-    }
-
-    if (support.supportsTraderGroups && state.filters.traderGroup && event.traderGroup !== state.filters.traderGroup) {
-      return false;
-    }
-
-    if (support.supportsTraderIds && state.filters.traderId && event.traderId !== state.filters.traderId) {
-      return false;
-    }
-
-    return true;
+    return matchesTradeFilters(event, state);
   }
 
   if (event.kind === "ownTrade") {
-    if (!state.visibility.ownTrades) {
-      return false;
-    }
-
-    if (
-      quantityRange &&
-      ((quantityRange[0] !== null && event.quantity < quantityRange[0]) ||
-        (quantityRange[1] !== null && event.quantity > quantityRange[1]))
-    ) {
-      return false;
-    }
-
-    if (state.filters.tradeType !== "all" && state.filters.tradeType !== "own") {
-      return false;
-    }
-
-    if (support.supportsTraderGroups && state.filters.traderGroup && event.traderGroup !== state.filters.traderGroup) {
-      return false;
-    }
-
-    if (support.supportsTraderIds && state.filters.traderId && event.traderId !== state.filters.traderId) {
-      return false;
-    }
-
-    return true;
+    return matchesTradeFilters(event, state);
   }
 
   return true;
@@ -195,6 +365,43 @@ function filterEventsToViewport(events: MarketEvent[], viewport: ChartViewport) 
       event.price >= viewport.minPrice &&
       event.price <= viewport.maxPrice,
   );
+}
+
+function clampViewportToBounds(viewport: ChartViewport, bounds: ChartViewport): ChartViewport {
+  const boundsTimeSpan = Math.max(bounds.maxTimestamp - bounds.minTimestamp, 1);
+  const boundsPriceSpan = Math.max(bounds.maxPrice - bounds.minPrice, 1);
+  const viewportTimeSpan = Math.min(Math.max(viewport.maxTimestamp - viewport.minTimestamp, 1), boundsTimeSpan);
+  const viewportPriceSpan = Math.min(Math.max(viewport.maxPrice - viewport.minPrice, 1), boundsPriceSpan);
+
+  let minTimestamp = viewport.minTimestamp;
+  let maxTimestamp = viewport.minTimestamp + viewportTimeSpan;
+  let minPrice = viewport.minPrice;
+  let maxPrice = viewport.minPrice + viewportPriceSpan;
+
+  if (minTimestamp < bounds.minTimestamp) {
+    minTimestamp = bounds.minTimestamp;
+    maxTimestamp = minTimestamp + viewportTimeSpan;
+  }
+  if (maxTimestamp > bounds.maxTimestamp) {
+    maxTimestamp = bounds.maxTimestamp;
+    minTimestamp = maxTimestamp - viewportTimeSpan;
+  }
+
+  if (minPrice < bounds.minPrice) {
+    minPrice = bounds.minPrice;
+    maxPrice = minPrice + viewportPriceSpan;
+  }
+  if (maxPrice > bounds.maxPrice) {
+    maxPrice = bounds.maxPrice;
+    minPrice = maxPrice - viewportPriceSpan;
+  }
+
+  return {
+    minTimestamp,
+    maxTimestamp,
+    minPrice,
+    maxPrice,
+  };
 }
 
 export function listProducts(dataset: MarketDataset | null): Product[] {
@@ -220,28 +427,55 @@ export function listUniqueTraderGroups(trades: Array<Trade | OwnTrade>) {
 export function getTradeFilterSupport(product: ProductMarketData | null): TradeFilterSupport {
   const trades = [...(product?.trades ?? []), ...(product?.ownTrades ?? [])];
   const quantities = trades.map((trade) => trade.quantity);
+  const bigTradeThreshold = getBigTradeThreshold(product?.trades ?? []);
+  const traderClassCounts: Record<TraderClass, number> = { M: 0, S: 0, B: 0, I: 0, F: 0 };
+  let usesInferredTraderClasses = false;
+
+  if (product) {
+    for (const trade of product.trades) {
+      const traderClass = classifyTrade(product, trade, "trade", bigTradeThreshold);
+      traderClassCounts[traderClass] += 1;
+      if (!inferExplicitTraderClass([trade.traderClass, trade.traderGroup, trade.traderId, trade.buyer, trade.seller])) {
+        usesInferredTraderClasses = true;
+      }
+    }
+
+    for (const trade of product.ownTrades) {
+      const traderClass = classifyTrade(product, trade, "ownTrade", bigTradeThreshold);
+      traderClassCounts[traderClass] += 1;
+      if (!inferExplicitTraderClass([trade.traderClass, trade.traderGroup, trade.traderId, trade.buyer, trade.seller])) {
+        usesInferredTraderClasses = true;
+      }
+    }
+  }
 
   return {
     availableTraderIds: listUniqueTraders(trades),
     availableTraderGroups: listUniqueTraderGroups(trades),
+    availableTraderClasses: TRADER_CLASS_ORDER.filter((traderClass) => traderClassCounts[traderClass] > 0),
+    traderClassCounts,
     supportsTraderIds: trades.some((trade) => Boolean(trade.traderId)),
     supportsTraderGroups: trades.some((trade) => Boolean(trade.traderGroup)),
     minTradeQuantity: quantities.length ? Math.min(...quantities) : null,
     maxTradeQuantity: quantities.length ? Math.max(...quantities) : null,
+    bigTradeThreshold,
+    usesInferredTraderClasses,
   };
 }
 
 function buildFilterSummary(state: DashboardState, support: TradeFilterSupport) {
   const summary: string[] = [];
 
-  summary.push(`Trade type: ${state.filters.tradeType}`);
-
-  if (support.supportsTraderGroups && state.filters.traderGroup) {
-    summary.push(`Group: ${state.filters.traderGroup}`);
+  if (state.filters.selectedTraderClasses.length !== TRADER_CLASS_ORDER.length) {
+    summary.push(`Classes: ${state.filters.selectedTraderClasses.join(", ") || "none"}`);
   }
 
-  if (support.supportsTraderIds && state.filters.traderId) {
-    summary.push(`Trader: ${state.filters.traderId}`);
+  if (support.supportsTraderGroups && state.filters.selectedTraderGroups.length > 0) {
+    summary.push(`Groups: ${state.filters.selectedTraderGroups.join(", ")}`);
+  }
+
+  if (support.supportsTraderIds && state.filters.selectedTraderIds.length > 0) {
+    summary.push(`Traders: ${state.filters.selectedTraderIds.join(", ")}`);
   }
 
   if (state.filters.quantityRange) {
@@ -300,11 +534,12 @@ export function buildChartSeriesBundle(product: ProductMarketData | null, state:
     };
   }
 
+  const filterSupport = getTradeFilterSupport(product);
+  const bigTradeThreshold = filterSupport.bigTradeThreshold;
   const bookBidEvents = flattenSnapshotLevels(product.bookSnapshots, "bids", "bid");
   const bookAskEvents = flattenSnapshotLevels(product.bookSnapshots, "asks", "ask");
-  const tradeEvents = tradesToEvents(product.trades, "trade");
-  const ownTradeEvents = tradesToEvents(product.ownTrades, "ownTrade");
-  const filterSupport = getTradeFilterSupport(product);
+  const tradeEvents = tradesToEvents(product, product.trades, "trade", bigTradeThreshold);
+  const ownTradeEvents = tradesToEvents(product, product.ownTrades, "ownTrade", bigTradeThreshold);
 
   const allEvents = [...bookBidEvents, ...bookAskEvents, ...tradeEvents, ...ownTradeEvents]
     .filter((event) => eventMatchesFilters(event, state, filterSupport))
@@ -315,7 +550,7 @@ export function buildChartSeriesBundle(product: ProductMarketData | null, state:
   );
 
   const fullBounds = collectChartBounds(allEvents, visibleIndicators);
-  const viewport = state.chartViewport ?? fullBounds;
+  const viewport = state.chartViewport ? clampViewportToBounds(state.chartViewport, fullBounds) : fullBounds;
   const visibleEvents = filterEventsToViewport(allEvents, viewport).sort((left, right) => left.timestamp - right.timestamp);
   return {
     visibleBids: visibleEvents.filter((event) => event.kind === "bid"),
@@ -345,6 +580,8 @@ export function buildInspectionState(
   visibleSeries: ChartSeriesBundle,
 ): DashboardInspectionState {
   const hoveredTimestamp = hoveredEvent?.timestamp ?? null;
+  const visibleTradesAtHoveredTimestamp = eventsAtTimestamp(visibleSeries.visibleTrades, hoveredTimestamp);
+  const visibleOwnTradesAtHoveredTimestamp = eventsAtTimestamp(visibleSeries.visibleOwnTrades, hoveredTimestamp);
 
   return {
     hoveredTimestamp,
@@ -357,6 +594,41 @@ export function buildInspectionState(
     nearestVisibleAsk: nearestByTimestamp(visibleSeries.visibleAsks, hoveredTimestamp),
     nearestVisibleTrade: nearestByTimestamp(visibleSeries.visibleTrades, hoveredTimestamp),
     nearestVisibleOwnTrade: nearestByTimestamp(visibleSeries.visibleOwnTrades, hoveredTimestamp),
+    visibleTradesAtHoveredTimestamp,
+    visibleOwnTradesAtHoveredTimestamp,
+    activeFilterSummary: visibleSeries.filterSummary,
+  };
+}
+
+export function buildTimestampInspectionState(
+  product: ProductMarketData | null,
+  hoveredTimestamp: Timestamp | null,
+  visibleSeries: ChartSeriesBundle,
+): DashboardInspectionState {
+  const visibleTradesAtHoveredTimestamp = eventsAtTimestamp(visibleSeries.visibleTrades, hoveredTimestamp);
+  const visibleOwnTradesAtHoveredTimestamp = eventsAtTimestamp(visibleSeries.visibleOwnTrades, hoveredTimestamp);
+  const nearestVisibleTrade = nearestByTimestamp(visibleSeries.visibleTrades, hoveredTimestamp);
+  const nearestVisibleOwnTrade = nearestByTimestamp(visibleSeries.visibleOwnTrades, hoveredTimestamp);
+  const hoveredEvent =
+    visibleOwnTradesAtHoveredTimestamp[0] ??
+    visibleTradesAtHoveredTimestamp[0] ??
+    nearestVisibleOwnTrade ??
+    nearestVisibleTrade ??
+    null;
+
+  return {
+    hoveredTimestamp,
+    hoveredProductId: product?.product.id ?? null,
+    hoveredEvent,
+    hoveredEventType: hoveredEvent?.kind ?? null,
+    hoveredPrice: hoveredEvent?.price ?? null,
+    hoveredQuantity: hoveredEvent?.quantity ?? null,
+    nearestVisibleBid: nearestByTimestamp(visibleSeries.visibleBids, hoveredTimestamp),
+    nearestVisibleAsk: nearestByTimestamp(visibleSeries.visibleAsks, hoveredTimestamp),
+    nearestVisibleTrade,
+    nearestVisibleOwnTrade,
+    visibleTradesAtHoveredTimestamp,
+    visibleOwnTradesAtHoveredTimestamp,
     activeFilterSummary: visibleSeries.filterSummary,
   };
 }
@@ -580,13 +852,21 @@ export function derivePnlSummary(
   };
 }
 
-export function deriveTradeTape(product: ProductMarketData | null, inspection: DashboardInspectionState, limit = 14) {
+export function deriveTradeTape(
+  product: ProductMarketData | null,
+  inspection: DashboardInspectionState,
+  state: DashboardState,
+  limit = 14,
+) {
   if (!product) {
     return {
       rows: [] as TradeTapeRow[],
       highlightedTradeId: null as string | null,
     };
   }
+
+  const filterSupport = getTradeFilterSupport(product);
+  const bigTradeThreshold = filterSupport.bigTradeThreshold;
 
   const rows: TradeTapeRow[] = [
     ...product.ownTrades.map((trade) => ({
@@ -601,6 +881,7 @@ export function deriveTradeTape(product: ProductMarketData | null, inspection: D
       seller: trade.seller,
       traderId: trade.traderId,
       traderGroup: trade.traderGroup,
+      traderClass: classifyTrade(product, trade, "ownTrade", bigTradeThreshold),
     })),
     ...product.trades.map((trade) => ({
       id: trade.id,
@@ -614,24 +895,26 @@ export function deriveTradeTape(product: ProductMarketData | null, inspection: D
       seller: trade.seller,
       traderId: trade.traderId,
       traderGroup: trade.traderGroup,
+      traderClass: classifyTrade(product, trade, "trade", bigTradeThreshold),
     })),
   ];
+  const filteredRows = rows.filter((row) => matchesTradeFilters(row, state));
 
   const sorted = inspection.hoveredTimestamp !== null
-    ? rows
+    ? filteredRows
         .slice()
         .sort(
           (left, right) =>
             Math.abs(left.timestamp - inspection.hoveredTimestamp!) - Math.abs(right.timestamp - inspection.hoveredTimestamp!) ||
             right.timestamp - left.timestamp,
         )
-    : rows.slice().sort((left, right) => right.timestamp - left.timestamp);
+    : filteredRows.slice().sort((left, right) => right.timestamp - left.timestamp);
 
   return {
     rows: sorted.slice(0, limit),
     highlightedTradeId:
       inspection.hoveredTimestamp !== null
-        ? nearestByTimestamp(rows, inspection.hoveredTimestamp)?.id ?? null
-        : rows[0]?.id ?? null,
+        ? nearestByTimestamp(filteredRows, inspection.hoveredTimestamp)?.id ?? null
+        : filteredRows[0]?.id ?? null,
   };
 }

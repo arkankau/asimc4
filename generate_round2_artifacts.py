@@ -838,6 +838,45 @@ ROUND2_FINDINGS = dedent(
       - spread widened by roughly `1` tick across the whole round profile
       - trade count stayed flat around `332` per day
 
+    ## Live validation from Round 1
+
+    Observed live Round 1 behavior matched the historical sample almost exactly:
+
+    - `INTARIAN_PEPPER_ROOT`
+      - same deterministic upward slope: about `0.001` per timestamp, or `0.100` per 100-unit tick
+      - same residual noise band: roughly `[-10, +10]`
+      - same practical conclusion: going max long immediately was optimal
+    - `ASH_COATED_OSMIUM`
+      - actual sigma was about `4.97`, which sits inside the historical `~5 to 6` range
+      - mean stayed pinned at essentially `10,000`
+      - no surprise jumps or regime breaks appeared
+
+    Practical conclusion:
+
+    - The historical Round 1 sample behaved like a live proxy, not like a fragile backtest artifact.
+    - That materially lowers the chance that the Round 2 playbook is just overfit historical pattern-matching.
+
+    ## Round 2 actual expectation
+
+    Given the Round 1 live validation and the fact that Round 2 history is a direct continuation of the same processes:
+
+    - expect `INTARIAN_PEPPER_ROOT` to keep the same anchored upward drift with tight residual noise
+    - expect `ASH_COATED_OSMIUM` to remain a stationary inventory-management / quote-placement product around `10,000`
+    - do not expect regime-detection logic to add much value unless the live tape visibly breaks these invariants
+
+    ## Submission implication
+
+    The highest-conviction low-complexity playbook is therefore:
+
+    - `INTARIAN_PEPPER_ROOT`
+      - go to the long limit as early as liquidity allows
+      - treat positive-residual fade trades as optional, not core
+      - prioritize staying long over short-term micro-optimization
+    - `ASH_COATED_OSMIUM`
+      - keep a simple passive market maker around `10,001`
+      - use imbalance mainly to skew quotes, not to justify repeated crossing
+      - prefer robustness and fill quality over feature complexity
+
     ## Strategy implications
 
     - `ASH_COATED_OSMIUM`

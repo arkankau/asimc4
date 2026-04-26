@@ -1,10 +1,10 @@
 import { AppShell } from "../layout/AppShell";
-import { BacktestChart } from "../chart/BacktestChart";
-import { MarketChart } from "../chart/MarketChart";
+import { ProductMicrostructureChart } from "../chart/ProductMicrostructureChart";
 import { InspectionStrip } from "../chart/InspectionStrip";
 import { ControlPanel } from "../controls/ControlPanel";
 import { DashboardHeader } from "./DashboardHeader";
 import { useDashboard } from "../../state/DashboardProvider";
+import { HoverInspectorPanel } from "../panels/HoverInspectorPanel";
 import { InspectionPanel } from "../panels/InspectionPanel";
 import { LogsPanel } from "../panels/LogsPanel";
 import { TutorialOverviewPanel } from "../panels/TutorialOverviewPanel";
@@ -14,8 +14,9 @@ import { ProductPerformancePanel } from "../panels/ProductPerformancePanel";
 import { TradeTapePanel } from "../panels/TradeTapePanel";
 
 export function Dashboard() {
-  const { selectedDataset } = useDashboard();
+  const { selectedDataset, selectedProduct } = useDashboard();
   const isSubmissionMode = selectedDataset?.source === "submission";
+  const hasTradeTape = (selectedProduct?.trades.length ?? 0) > 0 || (selectedProduct?.ownTrades.length ?? 0) > 0;
 
   return (
     <AppShell
@@ -23,32 +24,21 @@ export function Dashboard() {
       sidebar={<ControlPanel />}
       main={
         <div className="dashboard-main">
-          {isSubmissionMode ? (
-            <>
-              <BacktestChart />
-              <div className="dashboard-main__grid">
-                <PnlPanel />
-                <PositionPanel />
-              </div>
-              <ProductPerformancePanel />
-              <TradeTapePanel />
-            </>
-          ) : (
-            <>
-              <MarketChart />
-              <InspectionStrip />
-              <div className="dashboard-main__grid">
-                <PnlPanel />
-                <PositionPanel />
-              </div>
-            </>
-          )}
+          <ProductMicrostructureChart />
+          <InspectionStrip />
+          <div className="dashboard-main__grid">
+            <PnlPanel />
+            <PositionPanel />
+          </div>
+          {isSubmissionMode ? <ProductPerformancePanel /> : null}
+          {hasTradeTape ? <TradeTapePanel /> : null}
         </div>
       }
       secondary={
         <div className="stack">
+          <HoverInspectorPanel />
           <TutorialOverviewPanel />
-          {isSubmissionMode ? null : <InspectionPanel />}
+          <InspectionPanel />
           <LogsPanel />
         </div>
       }

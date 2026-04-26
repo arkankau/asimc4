@@ -1,4 +1,4 @@
-import type { ChartViewport, DatasetId, MarketEvent, ProductId, ProductMarketData, Timestamp } from "./market";
+import type { ChartViewport, DatasetId, MarketEvent, ProductId, ProductMarketData, Timestamp, TraderClass } from "./market";
 
 export interface DashboardVisibilityState {
   bids: boolean;
@@ -15,9 +15,9 @@ export interface OverlaySettings {
 }
 
 export interface FilterState {
-  tradeType: "all" | "maker" | "taker" | "own";
-  traderGroup: string | null;
-  traderId: string | null;
+  selectedTraderClasses: TraderClass[];
+  selectedTraderGroups: string[];
+  selectedTraderIds: string[];
   quantityRange: [number | null, number | null] | null;
 }
 
@@ -32,6 +32,8 @@ export interface DashboardInspectionState {
   nearestVisibleAsk: MarketEvent | null;
   nearestVisibleTrade: MarketEvent | null;
   nearestVisibleOwnTrade: MarketEvent | null;
+  visibleTradesAtHoveredTimestamp: MarketEvent[];
+  visibleOwnTradesAtHoveredTimestamp: MarketEvent[];
   activeFilterSummary: string[];
 }
 
@@ -59,9 +61,9 @@ export type DashboardAction =
   | { type: "setNormalizationMode"; mode: OverlaySettings["normalizationMode"] }
   | { type: "setDownsamplingMode"; mode: OverlaySettings["downsamplingMode"] }
   | { type: "setDepthLevels"; levels: number[] }
-  | { type: "setTradeTypeFilter"; tradeType: FilterState["tradeType"] }
-  | { type: "setTraderGroupFilter"; traderGroup: string | null }
-  | { type: "setTraderIdFilter"; traderId: string | null }
+  | { type: "setSelectedTraderClasses"; traderClasses: TraderClass[] }
+  | { type: "setSelectedTraderGroups"; traderGroups: string[] }
+  | { type: "setSelectedTraderIds"; traderIds: string[] }
   | { type: "setQuantityRange"; quantityRange: [number | null, number | null] | null }
   | { type: "setChartViewport"; viewport: ChartViewport | null }
   | { type: "resetChartViewport" };

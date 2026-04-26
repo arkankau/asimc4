@@ -33,6 +33,22 @@ python3 -m imc_backtester /path/to/trading.py /path/to/submission.log \
   --limit INTARIAN_PEPPER_ROOT=80
 ```
 
+Round 2 market access approximation:
+
+```bash
+python3 -m imc_backtester /path/to/trading.py /path/to/submission.log \
+  --maf-contract won \
+  --maf-data-mode observed-is-baseline
+```
+
+Or resolve the contract automatically from `Trader.bid()` against a local cutoff:
+
+```bash
+python3 -m imc_backtester /path/to/trading.py /path/to/submission.log \
+  --maf-contract auto \
+  --maf-threshold 15
+```
+
 The replay output now includes a `metrics` block with:
 
 - exact PnL path derived from `activitiesLog`
@@ -77,3 +93,24 @@ Other modes:
 - `exclude`: drop submission trades entirely
 
 For a truly clean offline backtester, the best input would be logs from a passive or no-order submission.
+
+## Round 2 Market Access Fee
+
+If the strategy defines `Trader.bid()`, the replay runner can approximate the round-2 Market Access Fee flow:
+
+- winning the contract pays the returned MAF once and unlocks the extra quote share
+- losing the contract pays nothing and stays on the baseline share
+- `--maf-contract won|lost` forces the outcome
+- `--maf-contract auto --maf-threshold X` treats `Trader.bid() >= X` as a local proxy for winning
+
+Because offline logs only contain one observed market view, the runner makes the quote expansion explicit:
+
+- `--maf-data-mode observed-is-baseline`: assume the log already reflects only the baseline allocation; winners get an approximate volume upscale
+- `--maf-data-mode observed-is-full`: assume the log reflects the full market; losers get an approximate downscale to baseline
+
+Defaults:
+
+- baseline share: `0.75`
+- extra share: `0.25`
+
+This is intentionally approximate. The runner scales observed book and tape volume, but it cannot reconstruct the true missing quote set from historical data.

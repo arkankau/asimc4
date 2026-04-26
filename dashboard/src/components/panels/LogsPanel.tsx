@@ -9,7 +9,9 @@ export function LogsPanel() {
   const messages = [
     selectedDataset?.source === "submission"
       ? `Loaded submission dataset ${selectedDataset?.name ?? "n/a"} with ${selectedDataset?.metadata?.logCount ?? 0} non-empty log events.`
-      : selectedDataset?.metadata?.day !== undefined
+      : selectedDataset?.source === "historical" && selectedDataset?.metadata?.day !== undefined
+        ? `Loaded historical round ${selectedDataset.metadata.round} day ${selectedDataset.metadata.day}.`
+        : selectedDataset?.metadata?.day !== undefined
         ? `Loaded tutorial round ${selectedDataset.metadata.round} day ${selectedDataset.metadata.day}.`
         : `Loaded dataset ${selectedDataset?.name ?? "n/a"}.`,
     inspection.hoveredTimestamp !== null

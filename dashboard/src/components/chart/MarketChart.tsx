@@ -3,12 +3,15 @@ import { ChartContainer } from "./ChartContainer";
 import { useDashboard } from "../../state/DashboardProvider";
 import { formatPrice, formatQuantity, formatTimestamp } from "../../utils/formatters";
 import { buildInspectionState, findNearestEventByScreenX } from "../../utils/marketSelectors";
+import { getTraderClassColor, TRADER_CLASS_COLOR_ORDER } from "../../utils/traderClassColors";
 import type { ChartViewport, MarketEvent } from "../../types/market";
 
 const CHART_WIDTH = 920;
 const CHART_HEIGHT = 460;
 const PADDING = { top: 20, right: 20, bottom: 36, left: 64 };
 const MIN_ZOOM_SPAN_RATIO = 0.04;
+const ZOOM_IN_FACTOR = 0.85;
+const ZOOM_OUT_FACTOR = 1.2;
 
 function clamp(value: number, min: number, max: number) {
   return Math.min(Math.max(value, min), max);
@@ -70,6 +73,60 @@ function createZoomedViewport(
 
   if (isFullDomain) {
     return null;
+  }
+
+  return {
+    minTimestamp: nextMinTimestamp,
+    maxTimestamp: nextMaxTimestamp,
+    minPrice: nextMinPrice,
+    maxPrice: nextMaxPrice,
+  };
+}
+
+function createPannedViewport(
+  current: ChartViewport,
+  fullBounds: ChartViewport,
+  deltaTimestamp: number,
+  deltaPrice: number,
+): ChartViewport | null {
+  const timeSpan = current.maxTimestamp - current.minTimestamp;
+  const priceSpan = current.maxPrice - current.minPrice;
+
+  if (timeSpan <= 0 || priceSpan <= 0) {
+    return null;
+  }
+
+  let nextMinTimestamp = current.minTimestamp + deltaTimestamp;
+  let nextMaxTimestamp = current.maxTimestamp + deltaTimestamp;
+  let nextMinPrice = current.minPrice + deltaPrice;
+  let nextMaxPrice = current.maxPrice + deltaPrice;
+
+  if (nextMinTimestamp < fullBounds.minTimestamp) {
+    nextMinTimestamp = fullBounds.minTimestamp;
+    nextMaxTimestamp = fullBounds.minTimestamp + timeSpan;
+  }
+  if (nextMaxTimestamp > fullBounds.maxTimestamp) {
+    nextMaxTimestamp = fullBounds.maxTimestamp;
+    nextMinTimestamp = fullBounds.maxTimestamp - timeSpan;
+  }
+
+  if (nextMinPrice < fullBounds.minPrice) {
+    nextMinPrice = fullBounds.minPrice;
+    nextMaxPrice = fullBounds.minPrice + priceSpan;
+  }
+  if (nextMaxPrice > fullBounds.maxPrice) {
+    nextMaxPrice = fullBounds.maxPrice;
+    nextMinPrice = fullBounds.maxPrice - priceSpan;
+  }
+
+  const unchanged =
+    Math.abs(nextMinTimestamp - current.minTimestamp) < 0.0001 &&
+    Math.abs(nextMaxTimestamp - current.maxTimestamp) < 0.0001 &&
+    Math.abs(nextMinPrice - current.minPrice) < 0.0001 &&
+    Math.abs(nextMaxPrice - current.maxPrice) < 0.0001;
+
+  if (unchanged) {
+    return current;
   }
 
   return {
@@ -150,18 +207,50 @@ export function MarketChart() {
 
     event.preventDefault();
 
-    const rect = svgRef.current.getBoundingClientRect();
-    const chartX = clamp(event.clientX - rect.left, PADDING.left, CHART_WIDTH - PADDING.right);
-    const chartY = clamp(event.clientY - rect.top, PADDING.top, CHART_HEIGHT - PADDING.bottom);
-    const zoomFactor = event.deltaY < 0 ? 0.82 : 1.22;
+    const currentViewport = state.chartViewport ?? chartSeries.fullBounds;
+
+    // Keep pinch-to-zoom behavior, but make normal wheel/trackpad swipes pan.
+    if (event.ctrlKey || event.metaKey) {
+      const rect = svgRef.current.getBoundingClientRect();
+      const chartX = clamp(event.clientX - rect.left, PADDING.left, CHART_WIDTH - PADDING.right);
+      const chartY = clamp(event.clientY - rect.top, PADDING.top, CHART_HEIGHT - PADDING.bottom);
+      const zoomFactor = event.deltaY < 0 ? ZOOM_IN_FACTOR : ZOOM_OUT_FACTOR;
+
+      dispatch({
+        type: "setChartViewport",
+        viewport: createZoomedViewport(
+          currentViewport,
+          chartSeries.fullBounds,
+          chartX,
+          chartY,
+          plotWidth,
+          plotHeight,
+          zoomFactor,
+        ),
+      });
+      return;
+    }
+
+    const timeSpan = Math.max(currentViewport.maxTimestamp - currentViewport.minTimestamp, 1);
+    const priceSpan = Math.max(currentViewport.maxPrice - currentViewport.minPrice, 1);
+    const deltaTimestamp = (event.deltaX / plotWidth) * timeSpan;
+    const deltaPrice = (event.deltaY / plotHeight) * priceSpan;
 
     dispatch({
       type: "setChartViewport",
+      viewport: createPannedViewport(currentViewport, chartSeries.fullBounds, deltaTimestamp, deltaPrice),
+    });
+  };
+
+  const handleZoomButton = (zoomFactor: number) => {
+    const currentViewport = state.chartViewport ?? chartSeries.fullBounds;
+    dispatch({
+      type: "setChartViewport",
       viewport: createZoomedViewport(
-        state.chartViewport ?? chartSeries.fullBounds,
+        currentViewport,
         chartSeries.fullBounds,
-        chartX,
-        chartY,
+        PADDING.left + plotWidth / 2,
+        PADDING.top + plotHeight / 2,
         plotWidth,
         plotHeight,
         zoomFactor,
@@ -177,6 +266,12 @@ export function MarketChart() {
         <div className="chart-card__aside-group">
           <span className="chart-card__stat">{chartSeries.visibleEvents.length} visible events</span>
           {chartSeries.filterSummary.length > 0 ? <span className="chart-card__stat">{chartSeries.filterSummary[0]}</span> : null}
+          <button className="chart-card__button" type="button" onClick={() => handleZoomButton(ZOOM_IN_FACTOR)}>
+            Zoom In +
+          </button>
+          <button className="chart-card__button" type="button" onClick={() => handleZoomButton(ZOOM_OUT_FACTOR)}>
+            Zoom Out -
+          </button>
           <button
             className="chart-card__button"
             type="button"
@@ -265,10 +360,10 @@ export function MarketChart() {
             cx={xScale(event.timestamp)}
             cy={yScale(event.price)}
             r={1.2 + Math.min(event.quantity, 6) * 0.22}
-            fill={event.side === "buy" ? "#58a6ff" : "#f0883e"}
+            fill={getTraderClassColor(event.traderClass)}
             opacity={0.75}
-            stroke="#0d1117"
-            strokeWidth="0.8"
+            stroke={getTraderClassColor(event.traderClass)}
+            strokeWidth="1.1"
           />
         ))}
 
@@ -280,9 +375,9 @@ export function MarketChart() {
             <polygon
               key={event.id}
               points={renderOwnTradeDiamond(cx, cy, radius)}
-              fill="#f4c95d"
+              fill={getTraderClassColor(event.traderClass)}
               opacity={0.95}
-              stroke="#0d1117"
+              stroke={getTraderClassColor(event.traderClass)}
               strokeWidth="1"
             />
           );
@@ -302,6 +397,14 @@ export function MarketChart() {
           <circle cx={hoveredX} cy={hoveredY} r={5.5} fill="#f4c95d" stroke="#fff1" />
         ) : null}
       </svg>
+      <div className="chart-class-legend">
+        {TRADER_CLASS_COLOR_ORDER.map((traderClass) => (
+          <span className="chart-class-legend__item" key={traderClass}>
+            <span className="chart-class-legend__dot" style={{ backgroundColor: getTraderClassColor(traderClass) }} />
+            {traderClass}
+          </span>
+        ))}
+      </div>
 
       {inspection.hoveredEvent ? (
         <div className="chart-tooltip">
@@ -311,10 +414,11 @@ export function MarketChart() {
           <span>Qty {formatQuantity(inspection.hoveredQuantity)}</span>
           <span>Type {inspection.hoveredEventType}</span>
           {inspection.hoveredEvent?.tradeType ? <span>Flow {inspection.hoveredEvent.tradeType}</span> : null}
+          {inspection.hoveredEvent?.traderClass ? <span>Class {inspection.hoveredEvent.traderClass}</span> : null}
         </div>
       ) : (
         <div className="chart-tooltip chart-tooltip--empty">
-          Hover the chart to inspect the nearest event. Scroll to zoom and double-click to reset.
+          Hover to inspect. Use Zoom In/Out buttons and swipe/scroll to pan. Double-click resets.
         </div>
       )}
     </ChartContainer>

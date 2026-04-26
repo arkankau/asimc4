@@ -1,8 +1,9 @@
-import { useMemo, useState } from "react";
+import { useMemo } from "react";
 import { ChartContainer } from "./ChartContainer";
 import { useDashboard } from "../../state/DashboardProvider";
-import { aggregateDatasetPnlSeries } from "../../utils/marketSelectors";
+import { aggregateDatasetPnlSeries, buildTimestampInspectionState } from "../../utils/marketSelectors";
 import { formatSignedValue, formatTimestamp } from "../../utils/formatters";
+import { getTraderClassColor, TRADER_CLASS_COLOR_ORDER } from "../../utils/traderClassColors";
 
 const CHART_WIDTH = 920;
 const CHART_HEIGHT = 420;
@@ -27,8 +28,7 @@ function findNearestPoint<T extends { timestamp: number }>(points: T[], timestam
 }
 
 export function BacktestChart() {
-  const { selectedDataset, selectedProduct } = useDashboard();
-  const [hoveredTimestamp, setHoveredTimestamp] = useState<number | null>(null);
+  const { selectedDataset, selectedProduct, chartSeries, inspection, dispatch } = useDashboard();
 
   const datasetSeries = useMemo(() => aggregateDatasetPnlSeries(selectedDataset), [selectedDataset]);
   const productSeries = selectedProduct?.pnlSeries ?? [];
@@ -56,10 +56,44 @@ export function BacktestChart() {
     .map((point, index) => `${index === 0 ? "M" : "L"} ${scaleX(point.timestamp)} ${scaleY(point.value)}`)
     .join(" ");
 
-  const hoveredDatasetPoint = findNearestPoint(datasetSeries, hoveredTimestamp);
-  const hoveredProductPoint = findNearestPoint(productSeries, hoveredTimestamp);
+  const hoveredDatasetPoint = findNearestPoint(datasetSeries, inspection.hoveredTimestamp);
+  const hoveredProductPoint = findNearestPoint(productSeries, inspection.hoveredTimestamp);
   const activeTimestamp = hoveredProductPoint?.timestamp ?? hoveredDatasetPoint?.timestamp ?? null;
   const hoveredX = activeTimestamp !== null ? scaleX(activeTimestamp) : null;
+  const visibleMarketTradeMarkers = useMemo(
+    () =>
+      chartSeries.visibleTrades
+        .map((trade) => {
+          const anchorPoint = findNearestPoint(productSeries, trade.timestamp);
+          if (!anchorPoint) {
+            return null;
+          }
+
+          return {
+            ...trade,
+            anchorValue: anchorPoint.value,
+          };
+        })
+        .filter((trade): trade is NonNullable<typeof trade> => trade !== null),
+    [chartSeries.visibleTrades, productSeries],
+  );
+  const visibleOwnTradeMarkers = useMemo(
+    () =>
+      chartSeries.visibleOwnTrades
+        .map((trade) => {
+          const anchorPoint = findNearestPoint(productSeries, trade.timestamp);
+          if (!anchorPoint) {
+            return null;
+          }
+
+          return {
+            ...trade,
+            anchorValue: anchorPoint.value,
+          };
+        })
+        .filter((trade): trade is NonNullable<typeof trade> => trade !== null),
+    [chartSeries.visibleOwnTrades, productSeries],
+  );
 
   return (
     <ChartContainer
@@ -73,6 +107,9 @@ export function BacktestChart() {
         <div className="chart-card__aside-group">
           <span className="chart-card__stat">Submission mode</span>
           <span className="chart-card__stat">{datasetSeries.length} pnl points</span>
+          <span className="chart-card__stat">
+            {visibleMarketTradeMarkers.length + visibleOwnTradeMarkers.length} visible trades
+          </span>
         </div>
       }
     >
@@ -93,9 +130,17 @@ export function BacktestChart() {
               const rect = event.currentTarget.getBoundingClientRect();
               const relativeX = clamp(event.clientX - rect.left, PADDING.left, CHART_WIDTH - PADDING.right);
               const estimatedTimestamp = minTimestamp + ((relativeX - PADDING.left) / plotWidth) * xSpan;
-              setHoveredTimestamp(estimatedTimestamp);
+              const nextHoveredDatasetPoint = findNearestPoint(datasetSeries, estimatedTimestamp);
+              const nextHoveredProductPoint = findNearestPoint(productSeries, estimatedTimestamp);
+              const nextHoveredTimestamp =
+                nextHoveredProductPoint?.timestamp ?? nextHoveredDatasetPoint?.timestamp ?? null;
+
+              dispatch({
+                type: "setInspection",
+                inspection: buildTimestampInspectionState(selectedProduct, nextHoveredTimestamp, chartSeries),
+              });
             }}
-            onMouseLeave={() => setHoveredTimestamp(null)}
+            onMouseLeave={() => dispatch({ type: "clearInspection" })}
           >
             <rect x="0" y="0" width={CHART_WIDTH} height={CHART_HEIGHT} fill="#10151d" rx="12" />
 
@@ -130,6 +175,34 @@ export function BacktestChart() {
             {datasetPath ? <path d={datasetPath} fill="none" stroke="#58a6ff" strokeWidth="2.4" /> : null}
             {productPath ? <path d={productPath} fill="none" stroke="#f4c95d" strokeWidth="2.1" /> : null}
 
+            {visibleMarketTradeMarkers.map((trade) => (
+              <circle
+                key={`submission-market-${trade.id}`}
+                cx={scaleX(trade.timestamp)}
+                cy={scaleY(trade.anchorValue)}
+                r={2 + Math.min(trade.quantity, 8) * 0.14}
+                fill={getTraderClassColor(trade.traderClass)}
+                opacity={0.82}
+                stroke={getTraderClassColor(trade.traderClass)}
+                strokeWidth="1.1"
+              />
+            ))}
+
+            {visibleOwnTradeMarkers.map((trade) => (
+              <polygon
+                key={`submission-own-${trade.id}`}
+                points={`${scaleX(trade.timestamp)},${scaleY(trade.anchorValue) - 4} ${scaleX(trade.timestamp) + 4},${scaleY(
+                  trade.anchorValue,
+                )} ${scaleX(trade.timestamp)},${scaleY(trade.anchorValue) + 4} ${scaleX(trade.timestamp) - 4},${scaleY(
+                  trade.anchorValue,
+                )}`}
+                fill={getTraderClassColor(trade.traderClass)}
+                opacity={0.95}
+                stroke={getTraderClassColor(trade.traderClass)}
+                strokeWidth="1"
+              />
+            ))}
+
             {hoveredX !== null ? (
               <line
                 x1={hoveredX}
@@ -147,6 +220,14 @@ export function BacktestChart() {
               <circle cx={scaleX(hoveredProductPoint.timestamp)} cy={scaleY(hoveredProductPoint.value)} r="4" fill="#f4c95d" />
             ) : null}
           </svg>
+          <div className="chart-class-legend">
+            {TRADER_CLASS_COLOR_ORDER.map((traderClass) => (
+              <span className="chart-class-legend__item" key={traderClass}>
+                <span className="chart-class-legend__dot" style={{ backgroundColor: getTraderClassColor(traderClass) }} />
+                {traderClass}
+              </span>
+            ))}
+          </div>
 
           <div className="chart-tooltip">
             <span>{activeTimestamp !== null ? formatTimestamp(activeTimestamp) : "Hover the equity curve"}</span>
@@ -154,6 +235,22 @@ export function BacktestChart() {
             <strong>
               Product {formatSignedValue(hoveredProductPoint?.value ?? productSeries[productSeries.length - 1]?.value ?? null)}
             </strong>
+            {inspection.hoveredEvent?.traderClass ? <span>Class {inspection.hoveredEvent.traderClass}</span> : null}
+            {inspection.visibleOwnTradesAtHoveredTimestamp[0] ? (
+              <span>
+                Own trade {inspection.visibleOwnTradesAtHoveredTimestamp[0].buyer ?? "-"} vs{" "}
+                {inspection.visibleOwnTradesAtHoveredTimestamp[0].seller ?? "-"} @{" "}
+                {inspection.visibleOwnTradesAtHoveredTimestamp[0].price.toFixed(2)} x{" "}
+                {inspection.visibleOwnTradesAtHoveredTimestamp[0].quantity.toFixed(0)}
+              </span>
+            ) : inspection.visibleTradesAtHoveredTimestamp[0] ? (
+              <span>
+                Market trade {inspection.visibleTradesAtHoveredTimestamp[0].buyer ?? "-"} vs{" "}
+                {inspection.visibleTradesAtHoveredTimestamp[0].seller ?? "-"} @{" "}
+                {inspection.visibleTradesAtHoveredTimestamp[0].price.toFixed(2)} x{" "}
+                {inspection.visibleTradesAtHoveredTimestamp[0].quantity.toFixed(0)}
+              </span>
+            ) : null}
           </div>
         </>
       )}

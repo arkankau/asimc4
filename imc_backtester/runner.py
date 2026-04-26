@@ -36,6 +36,7 @@ class BacktestArtifacts:
     logs: list[dict[str, object]]
     positions: list[dict[str, object]]
     profit: float
+    market_access: dict[str, object] | None = None
 
 
 def parse_limit(values: list[str], products: list[str], default_limit: int) -> dict[str, int]:
@@ -80,14 +81,14 @@ def load_trader_module(algorithm_path: Path):
     return module
 
 
-def build_state(log_data: ParsedSubmissionLog, timestamp: int, state: TradingState) -> None:
-    state.timestamp = timestamp
+def build_state(products: list[str], snapshots: dict[str, PriceSnapshot], state: TradingState) -> None:
+    sample_snapshot = next(iter(snapshots.values()))
     state.listings = {}
     state.order_depths = {}
     state.observations = Observation()
 
-    for product in log_data.products:
-        snapshot = log_data.prices[timestamp][product]
+    for product in products:
+        snapshot = snapshots[product]
         depth = OrderDepth()
 
         for price, volume in zip(snapshot.bid_prices, snapshot.bid_volumes):
@@ -98,6 +99,8 @@ def build_state(log_data: ParsedSubmissionLog, timestamp: int, state: TradingSta
 
         state.order_depths[product] = depth
         state.listings[product] = Listing(symbol=product, product=product, denomination="XIRECS")
+
+    state.timestamp = sample_snapshot.timestamp
 
 
 def normalize_run_output(output):
@@ -139,6 +142,80 @@ def normalize_run_output(output):
     return normalized, str(trader_data)
 
 
+def resolve_market_access_bid(trader) -> float:
+    if not hasattr(trader, "bid"):
+        return 0.0
+
+    raw_bid = trader.bid()
+    if raw_bid is None:
+        return 0.0
+    if isinstance(raw_bid, bool) or not isinstance(raw_bid, (int, float)):
+        raise ValueError(f"Trader.bid() must return a numeric MAF value, got {type(raw_bid)}")
+    if raw_bid < 0:
+        raise ValueError(f"Trader.bid() must be non-negative, got {raw_bid}")
+
+    return float(raw_bid)
+
+
+def resolve_market_access(
+    trader,
+    *,
+    contract_mode: str,
+    threshold: float | None,
+    baseline_share: float,
+    extra_share: float,
+    data_mode: str,
+) -> dict[str, object]:
+    if baseline_share <= 0:
+        raise ValueError("--maf-baseline-share must be > 0")
+    if extra_share < 0:
+        raise ValueError("--maf-extra-share must be >= 0")
+
+    bid = resolve_market_access_bid(trader)
+    won_contract = False
+    notes: list[str] = []
+
+    if bid > 0:
+        if contract_mode == "won":
+            won_contract = True
+        elif contract_mode == "lost":
+            won_contract = False
+        else:
+            if threshold is None:
+                notes.append(
+                    "Trader.bid() was present, but offline contract ranking is unknowable; "
+                    "defaulted to baseline access. Use --maf-contract won|lost or --maf-threshold."
+                )
+            else:
+                won_contract = bid >= threshold
+    elif contract_mode == "won":
+        notes.append("Trader.bid() returned 0, so market access remained at the baseline share.")
+
+    full_share = baseline_share + extra_share
+    access_share = full_share if won_contract else baseline_share
+    observed_share = baseline_share if data_mode == "observed-is-baseline" else full_share
+    volume_scale = access_share / observed_share if observed_share > 0 else 1.0
+
+    if abs(volume_scale - 1.0) > 1e-9:
+        notes.append(
+            f"Applied approximate quote/tape volume scale {volume_scale:.4f} "
+            f"from {data_mode} to emulate round-2 market access."
+        )
+
+    return {
+        "bid": bid,
+        "won_contract": won_contract,
+        "fee_paid": bid if won_contract else 0.0,
+        "baseline_share": baseline_share,
+        "extra_share": extra_share,
+        "access_share": access_share,
+        "observed_share": observed_share,
+        "volume_scale": volume_scale,
+        "data_mode": data_mode,
+        "notes": notes,
+    }
+
+
 def enforce_limits(orders: dict[str, list[Order]], position: dict[str, int], limits: dict[str, int]) -> list[str]:
     warnings: list[str] = []
 
@@ -153,6 +230,57 @@ def enforce_limits(orders: dict[str, list[Order]], position: dict[str, int], lim
             orders.pop(product, None)
 
     return warnings
+
+
+def scale_quantity(quantity: int, factor: float) -> int:
+    if quantity == 0 or abs(factor - 1.0) <= 1e-9:
+        return quantity
+
+    scaled = int(round(abs(quantity) * factor))
+    if factor > 0 and scaled == 0:
+        scaled = 1
+
+    return scaled if quantity > 0 else -scaled
+
+
+def scale_snapshot(snapshot: PriceSnapshot, factor: float) -> PriceSnapshot:
+    if abs(factor - 1.0) <= 1e-9:
+        return snapshot
+
+    return PriceSnapshot(
+        day=snapshot.day,
+        timestamp=snapshot.timestamp,
+        product=snapshot.product,
+        bid_prices=list(snapshot.bid_prices),
+        bid_volumes=[scale_quantity(volume, factor) for volume in snapshot.bid_volumes],
+        ask_prices=list(snapshot.ask_prices),
+        ask_volumes=[scale_quantity(volume, factor) for volume in snapshot.ask_volumes],
+        mid_price=snapshot.mid_price,
+    )
+
+
+def scale_tape_trades(tape_trades: list[TapeTrade], factor: float) -> list[TapeTrade]:
+    if abs(factor - 1.0) <= 1e-9:
+        return tape_trades
+
+    scaled_trades: list[TapeTrade] = []
+    for trade in tape_trades:
+        scaled_quantity = scale_quantity(trade.quantity, factor)
+        if scaled_quantity <= 0:
+            continue
+        scaled_trades.append(
+            TapeTrade(
+                timestamp=trade.timestamp,
+                buyer=trade.buyer,
+                seller=trade.seller,
+                symbol=trade.symbol,
+                currency=trade.currency,
+                price=trade.price,
+                quantity=scaled_quantity,
+            )
+        )
+
+    return scaled_trades
 
 
 def trade_to_dict(trade: Trade) -> dict[str, object]:
@@ -382,10 +510,23 @@ def run_backtest(
     limits: dict[str, int],
     match_trades: str,
     submission_trade_mode: str,
+    maf_contract_mode: str,
+    maf_threshold: float | None,
+    maf_baseline_share: float,
+    maf_extra_share: float,
+    maf_data_mode: str,
 ) -> BacktestArtifacts:
     log_data = load_submission_log(log_path, include_submission_trades=True)
     trader_module = load_trader_module(algorithm_path)
     trader = trader_module.Trader()
+    market_access = resolve_market_access(
+        trader,
+        contract_mode=maf_contract_mode,
+        threshold=maf_threshold,
+        baseline_share=maf_baseline_share,
+        extra_share=maf_extra_share,
+        data_mode=maf_data_mode,
+    )
 
     state = TradingState(
         traderData="",
@@ -404,9 +545,21 @@ def run_backtest(
     activities_rows = [ACTIVITIES_HEADER]
     graph_points = ["timestamp;value"]
     output_trades: list[dict[str, object]] = []
+    fee_share = (
+        float(market_access["fee_paid"]) / len(log_data.products)
+        if log_data.products
+        else 0.0
+    )
 
     for timestamp in log_data.timestamps:
-        build_state(log_data, timestamp, state)
+        scaled_snapshots = {
+            product: scale_snapshot(
+                log_data.prices[timestamp][product],
+                float(market_access["volume_scale"]),
+            )
+            for product in log_data.products
+        }
+        build_state(log_data.products, scaled_snapshots, state)
         stdout = StringIO()
 
         with redirect_stdout(stdout):
@@ -429,7 +582,10 @@ def run_backtest(
                 product=product,
                 product_orders=orders.get(product, []),
                 state=state,
-                tape_trades=log_data.trade_history.get(timestamp, {}).get(product, []),
+                tape_trades=scale_tape_trades(
+                    log_data.trade_history.get(timestamp, {}).get(product, []),
+                    float(market_access["volume_scale"]),
+                ),
                 realized_cash=realized_cash,
                 match_trades=match_trades,
                 submission_trade_mode=submission_trade_mode,
@@ -449,22 +605,26 @@ def run_backtest(
 
         total_profit = 0.0
         for product in log_data.products:
-            snapshot = log_data.prices[timestamp][product]
+            snapshot = scaled_snapshots[product]
             mark_prices[product] = resolve_mark_price(snapshot, mark_prices[product])
-            marked_profit = realized_cash[product] + state.position.get(product, 0) * mark_prices[product]
+            marked_profit = realized_cash[product] + state.position.get(product, 0) * mark_prices[product] - fee_share
             activities_rows.append(format_activity_row(snapshot, marked_profit))
             total_profit += marked_profit
 
         graph_points.append(f"{timestamp};{total_profit}")
 
+    cash_balance = float(sum(realized_cash.values()) - float(market_access["fee_paid"]))
     positions = [
-        {"symbol": "XIRECS", "quantity": int(sum(realized_cash.values()))},
+        {"symbol": "XIRECS", "quantity": cash_balance},
         *(
             {"symbol": product, "quantity": state.position.get(product, 0)}
             for product in log_data.products
         ),
     ]
-    final_profit = float(sum(realized_cash[product] + state.position.get(product, 0) * mark_prices[product] for product in log_data.products))
+    final_profit = float(
+        sum(realized_cash[product] + state.position.get(product, 0) * mark_prices[product] for product in log_data.products)
+        - float(market_access["fee_paid"])
+    )
 
     output_trades.sort(key=lambda trade: (int(trade["timestamp"]), str(trade["symbol"]), float(trade["price"]), int(trade["quantity"])))
 
@@ -475,11 +635,12 @@ def run_backtest(
         logs=logs,
         positions=positions,
         profit=final_profit,
+        market_access=market_access,
     )
 
 
 def build_output_payload(artifacts: BacktestArtifacts) -> dict[str, object]:
-    return {
+    payload = {
         "round": "local",
         "status": "FINISHED",
         "profit": artifacts.profit,
@@ -489,6 +650,9 @@ def build_output_payload(artifacts: BacktestArtifacts) -> dict[str, object]:
         "logs": artifacts.logs,
         "positions": artifacts.positions,
     }
+    if artifacts.market_access is not None:
+        payload["marketAccess"] = artifacts.market_access
+    return payload
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -539,6 +703,35 @@ def main(argv: list[str] | None = None) -> int:
         default=0,
         help="Seed used for Monte Carlo bootstrap on PnL increments",
     )
+    parser.add_argument(
+        "--maf-contract",
+        choices=("auto", "won", "lost"),
+        default="auto",
+        help="How to resolve the round-2 Market Access Fee contract from Trader.bid()",
+    )
+    parser.add_argument(
+        "--maf-threshold",
+        type=float,
+        help="In --maf-contract auto mode, treat Trader.bid() >= threshold as winning the contract",
+    )
+    parser.add_argument(
+        "--maf-baseline-share",
+        type=float,
+        default=0.75,
+        help="Baseline quote share available without the round-2 market access contract",
+    )
+    parser.add_argument(
+        "--maf-extra-share",
+        type=float,
+        default=0.25,
+        help="Additional quote share granted if the round-2 market access contract is won",
+    )
+    parser.add_argument(
+        "--maf-data-mode",
+        choices=("observed-is-baseline", "observed-is-full"),
+        default="observed-is-baseline",
+        help="Interpret whether the supplied log already reflects only the baseline share or the full market",
+    )
     args = parser.parse_args(argv)
 
     log_data = load_submission_log(args.log_file, include_submission_trades=True)
@@ -549,6 +742,11 @@ def main(argv: list[str] | None = None) -> int:
         limits=limits,
         match_trades=args.match_trades,
         submission_trade_mode=args.submission_trades,
+        maf_contract_mode=args.maf_contract,
+        maf_threshold=args.maf_threshold,
+        maf_baseline_share=args.maf_baseline_share,
+        maf_extra_share=args.maf_extra_share,
+        maf_data_mode=args.maf_data_mode,
     )
     payload = build_output_payload(artifacts)
     payload["metrics"] = compute_metrics_from_payload(
@@ -566,6 +764,16 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Profit: {artifacts.profit:.4f}")
     print(f"Sharpe-like: {payload['metrics']['sharpe_like']:.4f}" if payload["metrics"]["sharpe_like"] is not None else "Sharpe-like: n/a")
     print(f"Max drawdown: {payload['metrics']['max_drawdown']:.4f}" if payload["metrics"]["max_drawdown"] is not None else "Max drawdown: n/a")
+    if artifacts.market_access is not None:
+        print(
+            "Market access: "
+            f"bid={artifacts.market_access['bid']:.4f}, "
+            f"contract={'won' if artifacts.market_access['won_contract'] else 'lost'}, "
+            f"fee_paid={artifacts.market_access['fee_paid']:.4f}, "
+            f"volume_scale={artifacts.market_access['volume_scale']:.4f}"
+        )
+        for note in artifacts.market_access.get("notes", []):
+            print(f"Note: {note}")
     for position in artifacts.positions:
         print(f"{position['symbol']}: {position['quantity']}")
 

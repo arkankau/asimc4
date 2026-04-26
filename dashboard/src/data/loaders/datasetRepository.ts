@@ -20,6 +20,51 @@ export interface DatasetRepository {
   importFile(file: File): Promise<MarketDataset>;
 }
 
+const UPLOADED_DATASETS_STORAGE_KEY = "dashboard.uploadedDatasets.v1";
+
+function readStoredUploadedDatasets(): MarketDataset[] {
+  if (typeof window === "undefined") {
+    return [];
+  }
+
+  const raw = window.localStorage.getItem(UPLOADED_DATASETS_STORAGE_KEY);
+  if (!raw) {
+    return [];
+  }
+
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+
+    return parsed.filter(
+      (entry): entry is MarketDataset =>
+        Boolean(entry) &&
+        typeof entry === "object" &&
+        typeof (entry as MarketDataset).id === "string" &&
+        Array.isArray((entry as MarketDataset).products),
+    );
+  } catch {
+    return [];
+  }
+}
+
+function writeStoredUploadedDatasets(datasets: MarketDataset[]) {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  try {
+    window.localStorage.setItem(UPLOADED_DATASETS_STORAGE_KEY, JSON.stringify(datasets));
+  } catch (error) {
+    console.warn(
+      "Could not persist uploaded datasets to localStorage — keeping them in memory for this session only.",
+      error,
+    );
+  }
+}
+
 function parseDelimitedRows(text: string): RawFlatMarketRow[] {
   const lines = text.trim().split(/\r?\n/);
   const [headerLine, ...rows] = lines;
@@ -198,6 +243,26 @@ function parseJson(text: string): MarketDataset {
 class InMemoryDatasetRepository implements DatasetRepository {
   private datasets = new Map<string, MarketDataset>([[mockDataset.id, mockDataset]]);
   private tutorialLoaded = false;
+  private uploadedDatasetsLoaded = false;
+  private userUploadedIds = new Set<string>();
+
+  private ensureUploadedDatasetsLoaded() {
+    if (this.uploadedDatasetsLoaded) {
+      return;
+    }
+
+    for (const dataset of readStoredUploadedDatasets()) {
+      this.datasets.set(dataset.id, dataset);
+      this.userUploadedIds.add(dataset.id);
+    }
+
+    this.uploadedDatasetsLoaded = true;
+  }
+
+  private persistUploadedDatasets() {
+    const uploaded = [...this.datasets.values()].filter((dataset) => this.userUploadedIds.has(dataset.id));
+    writeStoredUploadedDatasets(uploaded);
+  }
 
   private async ensureTutorialDatasetsLoaded() {
     if (this.tutorialLoaded) {
@@ -223,14 +288,16 @@ class InMemoryDatasetRepository implements DatasetRepository {
   }
 
   async listDatasets() {
+    this.ensureUploadedDatasetsLoaded();
     await this.ensureTutorialDatasetsLoaded();
     return [...this.datasets.values()].sort((left, right) => {
-      const sourceRank = { submission: 0, tutorial: 1, upload: 2, mock: 3 } as const;
+      const sourceRank = { submission: 0, historical: 1, tutorial: 2, upload: 3, mock: 4 } as const;
       return sourceRank[left.source] - sourceRank[right.source] || left.name.localeCompare(right.name);
     });
   }
 
   async getDataset(datasetId: string) {
+    this.ensureUploadedDatasetsLoaded();
     await this.ensureTutorialDatasetsLoaded();
     return this.datasets.get(datasetId) ?? null;
   }
@@ -250,6 +317,8 @@ class InMemoryDatasetRepository implements DatasetRepository {
     }
 
     this.datasets.set(dataset.id, dataset);
+    this.userUploadedIds.add(dataset.id);
+    this.persistUploadedDatasets();
     return dataset;
   }
 }

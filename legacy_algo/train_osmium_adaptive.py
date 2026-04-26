@@ -15,7 +15,7 @@ from typing import Iterable, List, Tuple
 
 import numpy as np
 
-from train_round1_strategy import (
+from legacy_algo.train_round1_strategy import (
     DayBook,
     POSITION_LIMITS,
     build_day_books,

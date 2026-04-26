@@ -10,7 +10,7 @@ from typing import Iterable, List
 
 import numpy as np
 
-from train_round1_strategy import (
+from legacy_algo.train_round1_strategy import (
     ACOParams,
     evaluate_aco,
     build_day_books,
