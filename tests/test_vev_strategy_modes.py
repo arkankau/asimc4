@@ -47,6 +47,20 @@ class VevStrategyModeTests(unittest.TestCase):
 
         self.assertLess(target, 0)
 
+    def test_black_scholes_mode_returns_short_target_when_mid_is_rich(self) -> None:
+        core = load_core()
+        trader = core.BaseVevTrader()
+        trader.STRATEGY_MODE = "black_scholes"
+
+        snap = {
+            "mid": 150.0,
+            "fair": 143.0,
+            "spread": 3.0,
+            "tte_years": 5.0 / 252.0,
+        }
+        target = trader._bs_single_vol_target("VEV_5300", snap, late_session=False)
+        self.assertLess(target, 0)
+
 
 if __name__ == "__main__":
     unittest.main()
