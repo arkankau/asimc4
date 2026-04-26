@@ -1101,5 +1101,11 @@ class BaseVevTrader:
 
 
 class Trader(BaseVevTrader):
-    VARIANT_NAME = "zscore_core"
-    STRATEGY_MODE = "zscore"
+    VARIANT_NAME = "smile_residual_live"
+    STRATEGY_MODE = "smile"
+    USE_NORMALIZED_RESIDUAL_SCORE = True
+    USE_COMPRESSION_TRIGGER = True
+    USE_DYNAMIC_STRIKE_ACTIVATION = True
+    DYNAMIC_ACTIVATION_VEGA_MIN = 2.5
+    DYNAMIC_REVERSION_MIN_OBS = 6
+    DYNAMIC_REVERSION_HIT_RATE_MIN = 0.5
